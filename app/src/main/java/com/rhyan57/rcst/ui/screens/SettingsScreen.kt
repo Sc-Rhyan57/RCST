@@ -1,5 +1,6 @@
 package com.rhyan57.rcst.ui.screens
 
+import android.content.Context
 import android.os.Build
 import androidx.compose.runtime.collectAsState
 import androidx.compose.animation.AnimatedVisibility
@@ -20,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -35,6 +37,10 @@ fun SettingsScreen(vm: MainViewModel) {
     val homeUrl         by vm.homeUrl.collectAsState()
     val jsEnabled       by vm.javascriptEnabled.collectAsState()
     val desktopSite     by vm.desktopSite.collectAsState()
+
+    val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("rcst_prefs", Context.MODE_PRIVATE) }
+    var monitorEnabled by remember { mutableStateOf(prefs.getBoolean("monitor_enabled", true)) }
 
     var visible         by remember { mutableStateOf(false) }
     var urlDialogOpen   by remember { mutableStateOf(false) }
@@ -126,6 +132,17 @@ fun SettingsScreen(vm: MainViewModel) {
                             subtitle = "Request desktop version of pages",
                             checked = desktopSite,
                             onToggle = vm::setDesktopSite
+                        )
+                        CardDivider()
+                        ToggleRow(
+                            icon = Icons.Outlined.NetworkCheck,
+                            title = "Monitorar requisições",
+                            subtitle = "Intercepta e salva todas as requisições",
+                            checked = monitorEnabled,
+                            onToggle = {
+                                monitorEnabled = it
+                                prefs.edit().putBoolean("monitor_enabled", it).apply()
+                            }
                         )
                     }
                     Spacer(Modifier.height(16.dp))

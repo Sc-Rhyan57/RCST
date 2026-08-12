@@ -15,6 +15,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -97,11 +98,38 @@ data class MediaLink(val url: String, val type: String)
 
 data class DownloadItem(val id: Long, val title: String, val status: Int, val progress: Int)
 
-class WebHookInterface(private val onLog: (String) -> Unit) {
+data class InspectElement(
+    val path: String,
+    val tag: String,
+    val text: String,
+    val href: String,
+    val src: String,
+    val color: String,
+    val bgColor: String
+)
+
+data class KeepEdit(
+    val path: String,
+    val text: String?,
+    val href: String?,
+    val src: String?,
+    val color: String?,
+    val bgColor: String?
+)
+
+class WebHookInterface(
+    private val onLog: (String) -> Unit,
+    private val onMedia: (String) -> Unit,
+    private val onInspect: (String) -> Unit
+) {
     @android.webkit.JavascriptInterface
-    fun onRequest(data: String) {
-        onLog(data)
-    }
+    fun onRequest(data: String) { onLog(data) }
+    
+    @android.webkit.JavascriptInterface
+    fun onMedia(data: String) { onMedia(data) }
+    
+    @android.webkit.JavascriptInterface
+    fun onInspect(data: String) { onInspect(data) }
 }
 
 private fun getDownloadStatusText(status: Int): String {
@@ -136,6 +164,12 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
     var showTools    by remember { mutableStateOf(false) }
     var toolsTab     by remember { mutableIntStateOf(0) }
     var showMenu     by remember { mutableStateOf(false) }
+    
+    var inspectorMode by remember { mutableStateOf(false) }
+    var blockRedirects by remember { mutableStateOf(false) }
+    var keepsEnabled by remember { mutableStateOf(true) }
+    var inspectData by remember { mutableStateOf<InspectElement?>(null) }
+    var keepsList by remember { mutableStateOf(mutableListOf<KeepEdit>()) }
 
     val prefs = context.getSharedPreferences("rcst_prefs", Context.MODE_PRIVATE)
     var monitorEnabled by remember { mutableStateOf(prefs.getBoolean("monitor_enabled", true)) }
@@ -154,6 +188,7 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
     val pendingRequests = remember { mutableMapOf<String, RequestLog>() }
     val cacheFile = remember { File(context.cacheDir, "rcst_session.json") }
     val hookPrefs = remember { context.getSharedPreferences("rcst_hooks", Context.MODE_PRIVATE) }
+    val keepsPrefs = remember { context.getSharedPreferences("rcst_keeps", Context.MODE_PRIVATE) }
 
     val desktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     val mobileUA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
@@ -166,16 +201,9 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                 for (i in 0 until arr.length()) {
                     val o = arr.getJSONObject(i)
                     list.add(RequestLog(
-                        o.getLong("id"),
-                        o.optString("timestamp"),
-                        o.optString("type"),
-                        o.optString("method"),
-                        o.optString("url"),
-                        o.optString("headers"),
-                        o.optString("body"),
-                        o.optInt("status"),
-                        o.optString("responseBody"),
-                        o.optBoolean("isBlocked")
+                        o.getLong("id"), o.optString("timestamp"), o.optString("type"), o.optString("method"),
+                        o.optString("url"), o.optString("headers"), o.optString("body"), o.optInt("status"),
+                        o.optString("responseBody"), o.optBoolean("isBlocked")
                     ))
                 }
                 requestLogs = list
@@ -184,6 +212,23 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
         }
         hooksInput = hookPrefs.getString("hooks", "") ?: ""
         pluginsInput = hookPrefs.getString("plugins", "") ?: ""
+        
+        try {
+            val keepsArr = JSONArray(keepsPrefs.getString("keeps", "[]"))
+            val kList = mutableListOf<KeepEdit>()
+            for (i in 0 until keepsArr.length()) {
+                val o = keepsArr.getJSONObject(i)
+                kList.add(KeepEdit(
+                    o.getString("path"),
+                    if(o.has("text")) o.getString("text") else null,
+                    if(o.has("href")) o.getString("href") else null,
+                    if(o.has("src")) o.getString("src") else null,
+                    if(o.has("color")) o.getString("color") else null,
+                    if(o.has("bgColor")) o.getString("bgColor") else null
+                ))
+            }
+            keepsList = kList
+        } catch (_: Exception) {}
 
         val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
         while (isActive) {
@@ -204,8 +249,8 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                         val status = cursor.getInt(statusIdx)
                         val bytesDownloaded = cursor.getLong(bytesDownloadedIdx)
                         val bytesTotal = cursor.getLong(bytesTotalIdx)
-                        val progress = if (bytesTotal > 0) (bytesDownloaded * 100 / bytesTotal).toInt() else -1
-                        items.add(DownloadItem(id, title, status, progress))
+                        val prog = if (bytesTotal > 0) (bytesDownloaded * 100 / bytesTotal).toInt() else -1
+                        items.add(DownloadItem(id, title, status, prog))
                     }
                 }
                 cursor.close()
@@ -215,21 +260,17 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
         }
     }
 
+    BackHandler(enabled = canGoBack) { webView?.goBack() }
+
     fun saveLogsCache() {
         scope.launch(Dispatchers.IO) {
             try {
                 val arr = JSONArray()
                 requestLogs.takeLast(200).forEach { log ->
                     val o = JSONObject()
-                    o.put("id", log.id)
-                    o.put("timestamp", log.timestamp)
-                    o.put("type", log.type)
-                    o.put("method", log.method)
-                    o.put("url", log.url)
-                    o.put("headers", log.headers)
-                    o.put("body", log.body)
-                    o.put("status", log.status)
-                    o.put("responseBody", log.responseBody)
+                    o.put("id", log.id); o.put("timestamp", log.timestamp); o.put("type", log.type)
+                    o.put("method", log.method); o.put("url", log.url); o.put("headers", log.headers)
+                    o.put("body", log.body); o.put("status", log.status); o.put("responseBody", log.responseBody)
                     o.put("isBlocked", log.isBlocked)
                     arr.put(o)
                 }
@@ -251,6 +292,25 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
             function applyHooks(d){h.forEach(function(f){try{f(d)}catch(e){}});return d;}
             function log(d){try{AndroidWebInterface.onRequest(JSON.stringify(d))}catch(e){}}
             
+            function isMediaUrl(url) {
+                if(!url) return false;
+                var exts = ['.mp4', '.webm', '.ogg', '.mp3', '.wav', '.m3u8', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp'];
+                var u = url.split('?')[0].split('#')[0].toLowerCase();
+                for(var i=0; i<exts.length; i++) if(u.endsWith(exts[i])) return true;
+                return false;
+            }
+            
+            function scanBodyForMedia(body) {
+                if(!body || typeof body !== 'string') return;
+                var regex = /https?:\/\/[^\s"'<>]+\.(?:mp4|webm|ogg|mp3|wav|m3u8|jpg|jpeg|png|gif|webp|svg|bmp)/gi;
+                var matches = body.match(regex);
+                if(matches) {
+                    matches.forEach(function(u) {
+                        try { AndroidWebInterface.onMedia(JSON.stringify({type: 'media', mediaType: 'Image', url: u})); } catch(e) {}
+                    });
+                }
+            }
+            
             var oO=XMLHttpRequest.prototype.open,oS=XMLHttpRequest.prototype.send,oH=XMLHttpRequest.prototype.setRequestHeader;
             XMLHttpRequest.prototype.open=function(m,u){this.__m=m;this.__u=u;this.__h={};return oO.apply(this,arguments)};
             XMLHttpRequest.prototype.setRequestHeader=function(n,v){this.__h[n]=v};
@@ -265,8 +325,17 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                 }
                 for(var k in d.headers){oH.call(this,k,d.headers[k])}
                 log({type:'xhr',method:d.method,url:d.url,headers:d.headers,body:d.body,status:0,responseBody:'',blocked:false});
-                this.addEventListener('load',function(){log({type:'xhr_res',method:self.__m,url:self.__u,headers:'',body:'',status:self.status,responseBody:self.responseText?self.responseText.substring(0,5000):''})});
-                return oS.call(this,d.body);
+                this.addEventListener('load',function(){
+                    var ct = self.getResponseHeader('content-type') || '';
+                    if(isMediaUrl(self.__u) || ct.indexOf('image/') === 0 || ct.indexOf('video/') === 0 || ct.indexOf('audio/') === 0) {
+                        var mediaType = ct.indexOf('video/') === 0 ? 'Video' : (ct.indexOf('audio/') === 0 ? 'Audio' : 'Image');
+                        try { AndroidWebInterface.onMedia(JSON.stringify({type: 'media', mediaType: mediaType, url: self.__u})); } catch(e) {}
+                    }
+                    scanBodyForMedia(self.responseText);
+                    log({type:'xhr_res',method:self.__m,url:self.__u,headers:'',body:'',status:self.status,responseBody:self.responseText?self.responseText.substring(0,5000):''})
+                });
+                if(d.method === 'GET' || d.method === 'HEAD'){ return oS.call(this, null); }
+                return oS.call(this, d.body || null);
             };
             
             var oF=window.fetch;
@@ -284,9 +353,23 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                     log({type:'fetch',method:m,url:u,headers:d.headers,body:b,status:0,responseBody:'Blocked by RCST',blocked:true});
                     return Promise.reject(new Error('Blocked by user'));
                 }
-                if(init){init.headers=hd;init.body=d.body}
+                if(init){
+                    init.headers=hd;
+                    if(d.body && d.body.length > 0){ init.body = d.body; } else { try { delete init.body; } catch(e) {} }
+                }
                 log({type:'fetch',method:m,url:u,headers:d.headers,body:b,status:0,responseBody:'',blocked:false});
-                return oF.apply(this,arguments).then(function(r){r.clone().text().then(function(t){log({type:'fetch_res',method:m,url:u,headers:'',body:'',status:r.status,responseBody:t.substring(0,5000)})});return r});
+                return oF.apply(this,arguments).then(function(r){
+                    var ct = r.headers.get('content-type') || '';
+                    if(isMediaUrl(u) || ct.indexOf('image/') === 0 || ct.indexOf('video/') === 0 || ct.indexOf('audio/') === 0) {
+                        var mediaType = ct.indexOf('video/') === 0 ? 'Video' : (ct.indexOf('audio/') === 0 ? 'Audio' : 'Image');
+                        try { AndroidWebInterface.onMedia(JSON.stringify({type: 'media', mediaType: mediaType, url: u})); } catch(e) {}
+                    }
+                    r.clone().text().then(function(t){ 
+                        scanBodyForMedia(t);
+                        log({type:'fetch_res',method:m,url:u,headers:'',body:'',status:r.status,responseBody:t.substring(0,5000)})
+                    });
+                    return r
+                });
             };
             
             var oW=window.WebSocket;
@@ -312,11 +395,92 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
         """
     }
 
+    val inspectJs = """
+        (function(){
+            if(window.__rcst_inspector_active) return;
+            window.__rcst_inspector_active = true;
+            document.addEventListener('click', function(e) {
+                if(!window.__rcst_inspector_active) return;
+                e.preventDefault();
+                e.stopPropagation();
+                var el = e.target;
+                if(window.__rcst_last_el) window.__rcst_last_el.style.outline = window.__rcst_last_outline || '';
+                window.__rcst_last_outline = el.style.outline;
+                el.style.outline = '3px solid #00FFFF';
+                window.__rcst_last_el = el;
+                var path = '';
+                while (el && el.nodeType === 1) {
+                    var sib = Array.prototype.indexOf.call(el.parentNode.children, el) + 1;
+                    path = el.tagName.toLowerCase() + ':nth-child(' + sib + ')' + (path ? ' > ' + path : '');
+                    el = el.parentNode;
+                }
+                var target = e.target;
+                var props = {
+                    path: path,
+                    tag: target.tagName,
+                    text: target.innerText,
+                    href: target.href || '',
+                    src: target.src || '',
+                    color: window.getComputedStyle(target).color,
+                    bgColor: window.getComputedStyle(target).backgroundColor
+                };
+                try { AndroidWebInterface.onInspect(JSON.stringify(props)); } catch(err) {}
+            }, true);
+        })();
+    """
+
+    val applyKeepsJs = remember(keepsList, keepsEnabled) {
+        if (!keepsEnabled || keepsList.isEmpty()) return@remember ""
+        val arr = JSONArray()
+        keepsList.forEach { k ->
+            val o = JSONObject()
+            o.put("path", k.path)
+            k.text?.let { o.put("text", it) }
+            k.href?.let { o.put("href", it) }
+            k.src?.let { o.put("src", it) }
+            k.color?.let { o.put("color", it) }
+            k.bgColor?.let { o.put("bgColor", it) }
+            arr.put(o)
+        }
+        """
+        (function(){
+            try {
+                var keeps = $arr;
+                keeps.forEach(function(k){
+                    var el = document.querySelector(k.path);
+                    if(el) {
+                        if(k.text) el.innerText = k.text;
+                        if(k.href) el.href = k.href;
+                        if(k.src) el.src = k.src;
+                        if(k.color) el.style.color = k.color;
+                        if(k.bgColor) el.style.backgroundColor = k.bgColor;
+                    }
+                });
+            } catch(e) {}
+        })();
+        """
+    }
+
     val discordFixJs = """
         try {
             Object.defineProperty(navigator, 'platform', { get: function () { return 'Win32'; } });
             window.chrome = { runtime: {} };
         } catch(e) {}
+    """
+
+    val domMediaExtractorJs = """
+        function extractDomMedia() {
+            let m = {type: 'dom', images:[], videos:[], audios:[]};
+            document.querySelectorAll('img').forEach(e => { 
+                if(e.src && !m.images.includes(e.src)) m.images.push(e.src);
+                if(e.srcset) e.srcset.split(',').forEach(s => { let u = s.trim().split(' ')[0]; if(u && !m.images.includes(u)) m.images.push(u); });
+            });
+            document.querySelectorAll('video, video source').forEach(e => { let src = e.src || e.currentSrc; if(src && !m.videos.includes(src)) m.videos.push(src); });
+            document.querySelectorAll('audio, audio source').forEach(e => { let src = e.src || e.currentSrc; if(src && !m.audios.includes(src)) m.audios.push(src); });
+            try { AndroidWebInterface.onMedia(JSON.stringify(m)); } catch(e) {}
+        }
+        setTimeout(extractDomMedia, 1000);
+        setInterval(extractDomMedia, 3000);
     """
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -327,10 +491,7 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                 .statusBarsPadding()
         ) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-                    .padding(horizontal = 4.dp),
+                modifier = Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = { webView?.goBack() }, enabled = canGoBack) {
@@ -350,9 +511,7 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                     keyboardActions = KeyboardActions(
                         onGo = {
                             var url = urlInput.trim()
-                            if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                                url = "https://$url"
-                            }
+                            if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://$url"
                             webView?.loadUrl(url)
                         }
                     ),
@@ -363,33 +522,42 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                         unfocusedBorderColor = Color.Transparent
                     ),
                     shape = RoundedCornerShape(20.dp),
-                    trailingIcon = {
-                        if (isLoading) {
-                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        }
-                    }
+                    trailingIcon = { if (isLoading) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp) }
                 )
 
-                IconButton(onClick = { webView?.reload() }) {
-                    Icon(Icons.Outlined.Refresh, "Reload", tint = MaterialTheme.colorScheme.onSurface)
-                }
-                IconButton(onClick = { showTools = !showTools }) {
-                    Icon(Icons.Outlined.Code, "Tools", tint = if (showTools) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
-                }
-                IconButton(onClick = { showMenu = true }) {
-                    Icon(Icons.Outlined.MoreVert, "Menu", tint = MaterialTheme.colorScheme.onSurface)
-                }
+                IconButton(onClick = { webView?.reload() }) { Icon(Icons.Outlined.Refresh, "Reload", tint = MaterialTheme.colorScheme.onSurface) }
+                IconButton(onClick = { showTools = !showTools }) { Icon(Icons.Outlined.Code, "Tools", tint = if (showTools) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
+                IconButton(onClick = { showMenu = true }) { Icon(Icons.Outlined.MoreVert, "Menu", tint = MaterialTheme.colorScheme.onSurface) }
+                
                 DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                     DropdownMenuItem(
-                        text = { Text(if (desktopSite) "Request Mobile Site" else "Request Desktop Site") },
+                        text = { Text(if (desktopSite) "Modo Mobile" else "Modo Desktop") },
+                        leadingIcon = { Icon(if(desktopSite) Icons.Outlined.Smartphone else Icons.Outlined.DesktopWindows, null) },
                         onClick = { vm.setDesktopSite(!desktopSite); showMenu = false }
                     )
                     DropdownMenuItem(
-                        text = { Text("New Tab") },
-                        onClick = { webView?.loadUrl(homeUrl); showMenu = false }
+                        text = { Text(if (inspectorMode) "Desativar Inspetor" else "Ativar Inspetor") },
+                        leadingIcon = { Icon(Icons.Outlined.HighlightMouse, null) },
+                        onClick = {
+                            inspectorMode = !inspectorMode
+                            if (inspectorMode) webView?.evaluateJavascript(inspectJs, null)
+                            else webView?.evaluateJavascript("window.__rcst_inspector_active=false; if(window.__rcst_last_el) window.__rcst_last_el.style.outline=window.__rcst_last_outline||'';", null)
+                            showMenu = false
+                        }
                     )
                     DropdownMenuItem(
-                        text = { Text("Clear Cache") },
+                        text = { Text(if (blockRedirects) "Desbloquear Redirecionamentos" else "Bloquear Redirecionamentos") },
+                        leadingIcon = { Icon(Icons.Outlined.Block, null) },
+                        onClick = { blockRedirects = !blockRedirects; showMenu = false }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (keepsEnabled) "Desativar Keeps" else "Ativar Keeps") },
+                        leadingIcon = { Icon(Icons.Outlined.Save, null) },
+                        onClick = { keepsEnabled = !keepsEnabled; webView?.reload(); showMenu = false }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Limpar Cache") },
+                        leadingIcon = { Icon(Icons.Outlined.DeleteSweep, null) },
                         onClick = {
                             webView?.clearCache(true)
                             webView?.clearHistory()
@@ -401,7 +569,7 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
             }
         }
 
-        Row(modifier = Modifier.fillMaxSize()) {
+        Row(modifier = Modifier.weight(1f)) {
             Box(modifier = Modifier.weight(if (showTools) 0.5f else 1f)) {
                 AndroidView(
                     factory = { ctx ->
@@ -412,10 +580,7 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                                     canGoBack = view.canGoBack()
                                     canGoForward = view.canGoForward()
                                     onScrolled(false)
-                                    if (url != null) {
-                                        currentUrl = url
-                                        urlInput = url
-                                    }
+                                    if (url != null) { currentUrl = url; urlInput = url }
                                     view.evaluateJavascript(discordFixJs, null)
                                     val keysArray = JSONArray()
                                     blockedKeys.forEach { keysArray.put(it) }
@@ -434,44 +599,27 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                                     if (pluginsInput.isNotEmpty()) {
                                         view.evaluateJavascript("try { eval(`$pluginsInput`); } catch(e) {}", null)
                                     }
-                                    
-                                    view.evaluateJavascript("""
-                                        (function(){
-                                            let m = {images:[], videos:[], audios:[]};
-                                            document.querySelectorAll('img').forEach(e => { if(e.src) m.images.push(e.src) });
-                                            document.querySelectorAll('video, video source').forEach(e => { if(e.src || e.currentSrc) m.videos.push(e.src || e.currentSrc) });
-                                            document.querySelectorAll('audio, audio source').forEach(e => { if(e.src || e.currentSrc) m.audios.push(e.src || e.currentSrc) });
-                                            return JSON.stringify(m);
-                                        })()
-                                    """) { res ->
-                                        try {
-                                            val json = JSONObject(res ?: "{}")
-                                            mediaLinks = mutableListOf<MediaLink>().apply {
-                                                json.optJSONArray("images")?.let { for (i in 0 until it.length()) add(MediaLink(it.getString(i), "Image")) }
-                                                json.optJSONArray("videos")?.let { for (i in 0 until it.length()) add(MediaLink(it.getString(i), "Video")) }
-                                                json.optJSONArray("audios")?.let { for (i in 0 until it.length()) add(MediaLink(it.getString(i), "Audio")) }
-                                            }
-                                        } catch (_: Exception) {}
+                                    if (keepsEnabled && applyKeepsJs.isNotEmpty()) {
+                                        view.evaluateJavascript(applyKeepsJs, null)
                                     }
+                                    if (inspectorMode) {
+                                        view.evaluateJavascript(inspectJs, null)
+                                    }
+                                    view.evaluateJavascript(domMediaExtractorJs, null)
                                     
                                     view.evaluateJavascript("""
-                                        (function(){
+                                        setTimeout(function() {
                                             let res = {};
                                             res.localStorage = JSON.stringify(localStorage);
                                             res.sessionStorage = JSON.stringify(sessionStorage);
-                                            return JSON.stringify(res);
-                                        })()
-                                    """) { res ->
-                                        try {
-                                            val json = JSONObject(res ?: "{}")
-                                            val ls = json.optString("localStorage")
-                                            val ss = json.optString("sessionStorage")
-                                            val cookies = CookieManager.getInstance().getCookie(url)
-                                            storageData = "Cookies:\n${cookies ?: "None"}\n\nLocal Storage:\n$ls\n\nSession Storage:\n$ss"
-                                        } catch (_: Exception) {}
-                                    }
+                                            try { AndroidWebInterface.onMedia('STORAGE:' + JSON.stringify(res)); } catch(e) {}
+                                        }, 2500);
+                                    """, null)
                                 }
                                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                                    if (blockRedirects && request.url.toString() != currentUrl) {
+                                        return true
+                                    }
                                     view.loadUrl(request.url.toString())
                                     return true
                                 }
@@ -479,17 +627,46 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                             setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
                                 try {
                                     val request = DownloadManager.Request(Uri.parse(url))
-                                    request.setMimeType(mimetype)
-                                    request.addRequestHeader("User-Agent", userAgent)
+                                    request.setMimeType(mimetype ?: "*/*")
+                                    request.addRequestHeader("User-Agent", userAgent ?: "Mozilla/5.0")
+                                    val cookies = CookieManager.getInstance().getCookie(url)
+                                    if (cookies != null) request.addRequestHeader("Cookie", cookies)
                                     val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
                                     request.setTitle(fileName)
                                     request.setDescription("Baixando via RCST Browser")
-                                    request.allowScanningByMediaScanner()
                                     request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                                     request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
                                     val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
                                     dm.enqueue(request)
-                                } catch (_: Exception) {}
+                                } catch (e: Exception) {
+                                    scope.launch(Dispatchers.IO) {
+                                        try {
+                                            val urlObj = URL(url)
+                                            val connection = urlObj.openConnection() as HttpURLConnection
+                                            connection.requestMethod = "GET"
+                                            connection.setRequestProperty("User-Agent", userAgent ?: "Mozilla/5.0")
+                                            val cookies = CookieManager.getInstance().getCookie(url)
+                                            if (cookies != null) connection.setRequestProperty("Cookie", cookies)
+                                            connection.connect()
+                                            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                                                val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                                                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                                                if (!downloadsDir.exists()) downloadsDir.mkdirs()
+                                                val outputFile = File(downloadsDir, fileName)
+                                                val inputStream = connection.inputStream
+                                                val outputStream = FileOutputStream(outputFile)
+                                                val buffer = ByteArray(4096)
+                                                var bytesRead: Int
+                                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                                    outputStream.write(buffer, 0, bytesRead)
+                                                }
+                                                outputStream.flush()
+                                                outputStream.close()
+                                                inputStream.close()
+                                            }
+                                        } catch (_: Exception) {}
+                                    }
+                                }
                             }
                             webChromeClient = object : WebChromeClient() {
                                 override fun onProgressChanged(view: WebView?, newProgress: Int) { progress = newProgress }
@@ -514,36 +691,82 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                             
                             if (monitorEnabled) {
-                                addJavascriptInterface(WebHookInterface { dataStr ->
-                                    try {
-                                        val json = JSONObject(dataStr)
-                                        val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
-                                        val type = json.optString("type")
-                                        val url = json.optString("url")
-                                        val method = json.optString("method")
-                                        val headers = json.optString("headers")
-                                        val body = json.optString("body")
-                                        val status = json.optInt("status", 0)
-                                        val resBody = json.optString("responseBody")
-                                        val isBlocked = json.optBoolean("blocked", false)
-                                        
-                                        val key = "$method:$url"
-                                        
-                                        if (type == "xhr_res" || type == "fetch_res") {
-                                            val pending = pendingRequests.remove(key)
-                                            val finalLog = pending?.copy(status = status, responseBody = resBody) ?: RequestLog(++logIdCounter, ts, type, method, url, headers, body, status, resBody, false)
-                                            requestLogs = requestLogs.toMutableList().also { it.add(0, finalLog) }
-                                            if (requestLogs.size > 200) requestLogs.removeAt(requestLogs.size - 1)
-                                            saveLogsCache()
-                                        } else {
-                                            val reqLog = RequestLog(++logIdCounter, ts, type, method, url, headers, body, 0, "", isBlocked)
-                                            pendingRequests[key] = reqLog
-                                            requestLogs = requestLogs.toMutableList().also { it.add(0, reqLog) }
-                                            if (requestLogs.size > 200) requestLogs.removeAt(requestLogs.size - 1)
-                                            saveLogsCache()
-                                        }
-                                    } catch (_: Exception) {}
-                                }, "AndroidWebInterface")
+                                addJavascriptInterface(WebHookInterface(
+                                    onLog = { dataStr ->
+                                        try {
+                                            val json = JSONObject(dataStr)
+                                            val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+                                            val type = json.optString("type")
+                                            val url = json.optString("url")
+                                            val method = json.optString("method")
+                                            val headers = json.optString("headers")
+                                            val body = json.optString("body")
+                                            val status = json.optInt("status", 0)
+                                            val resBody = json.optString("responseBody")
+                                            val isBlocked = json.optBoolean("blocked", false)
+                                            
+                                            val key = "$method:$url"
+                                            
+                                            if (type == "xhr_res" || type == "fetch_res") {
+                                                val pending = pendingRequests.remove(key)
+                                                val finalLog = pending?.copy(status = status, responseBody = resBody) ?: RequestLog(++logIdCounter, ts, type, method, url, headers, body, status, resBody, false)
+                                                requestLogs = requestLogs.toMutableList().also { it.add(0, finalLog) }
+                                                if (requestLogs.size > 200) requestLogs.removeAt(requestLogs.size - 1)
+                                                saveLogsCache()
+                                            } else {
+                                                val reqLog = RequestLog(++logIdCounter, ts, type, method, url, headers, body, 0, "", isBlocked)
+                                                pendingRequests[key] = reqLog
+                                                requestLogs = requestLogs.toMutableList().also { it.add(0, reqLog) }
+                                                if (requestLogs.size > 200) requestLogs.removeAt(requestLogs.size - 1)
+                                                saveLogsCache()
+                                            }
+                                        } catch (_: Exception) {}
+                                    },
+                                    onMedia = { dataStr ->
+                                        try {
+                                            if (dataStr.startsWith("STORAGE:")) {
+                                                val json = JSONObject(dataStr.substringAfter("STORAGE:"))
+                                                val ls = json.optString("localStorage")
+                                                val ss = json.optString("sessionStorage")
+                                                val cookies = CookieManager.getInstance().getCookie(currentUrl)
+                                                storageData = "Cookies:\n${cookies ?: "None"}\n\nLocal Storage:\n$ls\n\nSession Storage:\n$ss"
+                                            } else {
+                                                val json = JSONObject(dataStr)
+                                                val type = json.optString("type")
+                                                if (type == "media") {
+                                                    val mediaType = json.optString("mediaType")
+                                                    val url = json.optString("url")
+                                                    if (url.isNotEmpty() && mediaLinks.none { it.url == url }) {
+                                                        mediaLinks = mediaLinks.toMutableList().also { it.add(0, MediaLink(url, mediaType)) }
+                                                    }
+                                                } else if (type == "dom") {
+                                                    val currentUrls = mediaLinks.map { it.url }.toMutableSet()
+                                                    val newList = mediaLinks.toMutableList()
+                                                    
+                                                    json.optJSONArray("images")?.let { for (i in 0 until it.length()) { val u = it.getString(i); if (u.isNotEmpty() && !currentUrls.contains(u)) { newList.add(MediaLink(u, "Image")); currentUrls.add(u) } } }
+                                                    json.optJSONArray("videos")?.let { for (i in 0 until it.length()) { val u = it.getString(i); if (u.isNotEmpty() && !currentUrls.contains(u)) { newList.add(MediaLink(u, "Video")); currentUrls.add(u) } } }
+                                                    json.optJSONArray("audios")?.let { for (i in 0 until it.length()) { val u = it.getString(i); if (u.isNotEmpty() && !currentUrls.contains(u)) { newList.add(MediaLink(u, "Audio")); currentUrls.add(u) } } }
+                                                    
+                                                    mediaLinks = newList
+                                                }
+                                            }
+                                        } catch (_: Exception) {}
+                                    },
+                                    onInspect = { dataStr ->
+                                        try {
+                                            val json = JSONObject(dataStr)
+                                            inspectData = InspectElement(
+                                                json.getString("path"),
+                                                json.getString("tag"),
+                                                json.optString("text"),
+                                                json.optString("href"),
+                                                json.optString("src"),
+                                                json.optString("color"),
+                                                json.optString("bgColor")
+                                            )
+                                        } catch (_: Exception) {}
+                                    }
+                                ), "AndroidWebInterface")
                             }
                             loadUrl(homeUrl)
                             webView = this
@@ -561,6 +784,13 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                     }
                 }
+                
+                LinearProgressIndicator(
+                    progress = { progress / 100f },
+                    modifier = Modifier.fillMaxWidth().height(2.dp).align(Alignment.BottomCenter),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = Color.Transparent
+                )
             }
 
             if (showTools) {
@@ -590,6 +820,7 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                         mediaLinks = mediaLinks,
                         storageData = storageData,
                         downloadItems = downloadItems,
+                        keepsList = keepsList,
                         downloadHtml = {
                             webView?.evaluateJavascript("(function(){return document.documentElement.outerHTML})()") { result ->
                                 val html = result?.removeSurrounding("\"")?.replace("\\n", "\n")?.replace("\\\"", "\"") ?: ""
@@ -651,6 +882,105 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
             }
         }
     }
+
+    inspectData?.let { data ->
+        InspectorDialog(
+            data = data,
+            onDismiss = { inspectData = null },
+            onApply = { newText, newHref, newSrc, newColor, newBgColor, keep ->
+                val js = """
+                    (function(){
+                        var el = document.querySelector('${data.path}');
+                        if(el) {
+                            ${if(newText != null) "el.innerText = '$newText';" else ""}
+                            ${if(newHref != null) "el.href = '$newHref';" else ""}
+                            ${if(newSrc != null) "el.src = '$newSrc';" else ""}
+                            ${if(newColor != null) "el.style.color = '$newColor';" else ""}
+                            ${if(newBgColor != null) "el.style.backgroundColor = '$newBgColor';" else ""}
+                        }
+                    })();
+                """
+                webView?.evaluateJavascript(js, null)
+                if (keep) {
+                    val newKeep = KeepEdit(data.path, newText, newHref, newSrc, newColor, newBgColor)
+                    keepsList.add(newKeep)
+                    val arr = JSONArray()
+                    keepsList.forEach { k ->
+                        val o = JSONObject()
+                        o.put("path", k.path)
+                        k.text?.let { o.put("text", it) }
+                        k.href?.let { o.put("href", it) }
+                        k.src?.let { o.put("src", it) }
+                        k.color?.let { o.put("color", it) }
+                        k.bgColor?.let { o.put("bgColor", it) }
+                        arr.put(o)
+                    }
+                    keepsPrefs.edit().putString("keeps", arr.toString()).apply()
+                }
+                inspectData = null
+            }
+        )
+    }
+}
+
+@Composable
+private fun InspectorDialog(
+    data: InspectElement,
+    onDismiss: () -> Unit,
+    onApply: (String?, String?, String?, String?, String?, Boolean) -> Unit
+) {
+    var text by remember { mutableStateOf(data.text) }
+    var href by remember { mutableStateOf(data.href) }
+    var src by remember { mutableStateOf(data.src) }
+    var color by remember { mutableStateOf(data.color) }
+    var bgColor by remember { mutableStateOf(data.bgColor) }
+    var keep by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Inspetor de Elemento", color = DC.White) },
+        containerColor = DC.Card,
+        text = {
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                Text("Tag: ${data.tag}", color = DC.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                Text("Path: ${data.path}", color = DC.Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                Spacer(Modifier.height(8.dp))
+                
+                OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("Texto") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                if (data.href.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedTextField(value = href, onValueChange = { href = it }, label = { Text("Link (href)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                }
+                if (data.src.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedTextField(value = src, onValueChange = { src = it }, label = { Text("Source (src)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                }
+                Spacer(Modifier.height(4.dp))
+                OutlinedTextField(value = color, onValueChange = { color = it }, label = { Text("Cor do Texto") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                Spacer(Modifier.height(4.dp))
+                OutlinedTextField(value = bgColor, onValueChange = { bgColor = it }, label = { Text("Cor de Fundo") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = keep, onCheckedChange = { keep = it })
+                    Text("Keep edit on reload", color = DC.White, fontSize = 12.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { 
+                onApply(
+                    if(text != data.text) text else null,
+                    if(href != data.href && data.href.isNotEmpty()) href else null,
+                    if(src != data.src && data.src.isNotEmpty()) src else null,
+                    if(color != data.color) color else null,
+                    if(bgColor != data.bgColor) bgColor else null,
+                    keep
+                ) 
+            }) { Text("Aplicar") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar", color = DC.Muted) } }
+    )
 }
 
 @Composable
@@ -671,13 +1001,14 @@ private fun WebToolsPanel(
     mediaLinks: List<MediaLink>,
     storageData: String,
     downloadItems: List<DownloadItem>,
+    keepsList: List<KeepEdit>,
     downloadHtml: () -> Unit,
     downloadSiteZip: () -> Unit,
     blockedKeys: List<String>,
     onBlockToggle: (String, Boolean) -> Unit
 ) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    val tabsList = listOf("Monitor", "Source", "JS Live", "Hooks", "Plugins", "Media", "Storage", "Downloads")
+    val tabsList = listOf("Monitor", "Source", "JS", "Hooks", "Plugins", "Media", "Storage", "Downloads", "Keeps")
     
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -792,7 +1123,7 @@ private fun WebToolsPanel(
             }
             5 -> {
                 Column(Modifier.fillMaxSize().padding(8.dp)) {
-                    Text("Media Extractor:", color = DC.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text("Media Extractor (DOM + Requests):", color = DC.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
                     if (mediaLinks.isEmpty()) {
                         Text("No media found on this page.", color = DC.Muted, fontSize = 11.sp)
@@ -804,9 +1135,7 @@ private fun WebToolsPanel(
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Icon(
                                                 when(media.type) { "Video" -> Icons.Outlined.Videocam; "Audio" -> Icons.Outlined.AudioFile; else -> Icons.Outlined.Image },
-                                                null,
-                                                tint = DC.Primary,
-                                                modifier = Modifier.size(16.dp)
+                                                null, tint = DC.Primary, modifier = Modifier.size(16.dp)
                                             )
                                             Spacer(Modifier.width(8.dp))
                                             Text(media.type, color = DC.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
@@ -858,19 +1187,38 @@ private fun WebToolsPanel(
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Text(getDownloadStatusText(item.status), color = DC.Primary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                                             Spacer(Modifier.weight(1f))
-                                            if (item.progress >= 0) {
-                                                Text("${item.progress}%", color = DC.SubText, fontSize = 10.sp)
-                                            }
+                                            if (item.progress >= 0) Text("${item.progress}%", color = DC.SubText, fontSize = 10.sp)
                                         }
                                         if (item.status == DownloadManager.STATUS_RUNNING && item.progress >= 0) {
                                             Spacer(Modifier.height(4.dp))
                                             LinearProgressIndicator(
                                                 progress = { item.progress / 100f },
                                                 modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
-                                                color = DC.Primary,
-                                                trackColor = DC.Border
+                                                color = DC.Primary, trackColor = DC.Border
                                             )
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            8 -> {
+                Column(Modifier.fillMaxSize().padding(8.dp)) {
+                    Text("Keeps (Edições Salvas):", color = DC.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    if (keepsList.isEmpty()) {
+                        Text("Nenhuma edição salva.", color = DC.Muted, fontSize = 11.sp)
+                    } else {
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(keepsList) { keep ->
+                                Card(colors = CardDefaults.cardColors(containerColor = DC.Card), modifier = Modifier.fillMaxWidth()) {
+                                    Column(Modifier.padding(8.dp)) {
+                                        Text(keep.path, color = DC.SubText, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        keep.text?.let { Text("Texto: $it", color = DC.White, fontSize = 10.sp) }
+                                        keep.href?.let { Text("Link: $it", color = DC.White, fontSize = 10.sp) }
+                                        keep.color?.let { Text("Cor: $it", color = DC.White, fontSize = 10.sp) }
                                     }
                                 }
                             }

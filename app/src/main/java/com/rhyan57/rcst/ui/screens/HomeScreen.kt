@@ -14,21 +14,35 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.rhyan57.rcst.MainViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -38,6 +52,23 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+private object DC {
+    val Bg        = Color(0xFF0E0F13)
+    val Surface   = Color(0xFF17181C)
+    val Card      = Color(0xFF1E1F26)
+    val CardAlt   = Color(0xFF22232B)
+    val Border    = Color(0xFF2C2D35)
+    val Primary   = Color(0xFF5865F2)
+    val Success   = Color(0xFF23A55A)
+    val Warning   = Color(0xFFFAA61A)
+    val Error     = Color(0xFFED4245)
+    val White     = Color(0xFFF2F3F5)
+    val SubText   = Color(0xFFB5BAC1)
+    val Muted     = Color(0xFF72767D)
+    val OrbViolet = Color(0xFFB675F0)
+    val Teal      = Color(0xFF43B581)
+}
 
 data class RequestLog(
     val id: Long,
@@ -55,6 +86,26 @@ class WebHookInterface(private val onLog: (String) -> Unit) {
     @android.webkit.JavascriptInterface
     fun onRequest(data: String) {
         onLog(data)
+    }
+}
+
+private fun parseHtml(code: String): AnnotatedString {
+    if (code.isBlank()) return AnnotatedString(code)
+    return buildAnnotatedString {
+        val tagRegex = Regex("(<\\!--.*?-->)|(<\\/?[a-zA-Z0-9]+)|(\\/?>)|([a-zA-Z-]+=)|(\".*?\")")
+        var lastIndex = 0
+        tagRegex.findAll(code).forEach { match ->
+            append(code.substring(lastIndex, match.range.first))
+            when {
+                match.value.startsWith("<!--") -> withStyle(SpanStyle(color = Color(0xFF6A9955))) { append(match.value) }
+                match.value.startsWith("<") || match.value.startsWith("/") -> withStyle(SpanStyle(color = Color(0xFF569CD6))) { append(match.value) }
+                match.value.endsWith("=") -> withStyle(SpanStyle(color = Color(0xFF9CDCFE))) { append(match.value) }
+                match.value.startsWith("\"") -> withStyle(SpanStyle(color = Color(0xFFCE9178))) { append(match.value) }
+                else -> withStyle(SpanStyle(color = Color(0xFFD4D4D4))) { append(match.value) }
+            }
+            lastIndex = match.range.last + 1
+        }
+        append(code.substring(lastIndex))
     }
 }
 
@@ -81,7 +132,6 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
     var logIdCounter by remember { mutableStateOf(0L) }
     var showWebTools by remember { mutableStateOf(false) }
     var toolsTab by remember { mutableIntStateOf(0) }
-    var sourceCode by remember { mutableStateOf("") }
     var jsInput by remember { mutableStateOf("") }
     var hooksInput by remember { mutableStateOf("") }
     var htmlInject by remember { mutableStateOf("") }
@@ -360,115 +410,292 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
     }
 
     if (showWebTools) {
-        AlertDialog(
-            onDismissRequest = { showWebTools = false },
-            confirmButton = {
-                TextButton(onClick = { showWebTools = false }) {
-                    Text("Close")
-                }
+        WebToolsDialog(
+            onDismiss = { showWebTools = false },
+            webView = webView,
+            requestLogs = requestLogs,
+            toolsTab = toolsTab,
+            onTabChange = { toolsTab = it },
+            jsInput = jsInput,
+            onJsInputChange = { jsInput = it },
+            hooksInput = hooksInput,
+            onHooksChange = { hooksInput = it },
+            applyHooks = {
+                context.getSharedPreferences("rcst_hooks", Context.MODE_PRIVATE).edit().putString("hooks", hooksInput).apply()
+                webView?.evaluateJavascript("window.__rcst_user_hooks = `$hooksInput`;", null)
+                webView?.reload()
             },
-            title = { Text("Web Tools") },
-            text = {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                        TextButton(onClick = { toolsTab = 0 }) { Text("Monitor", color = if (toolsTab == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
-                        TextButton(onClick = { toolsTab = 1 }) { Text("Source", color = if (toolsTab == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
-                        TextButton(onClick = { toolsTab = 2 }) { Text("JS Exec", color = if (toolsTab == 2) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
-                        TextButton(onClick = { toolsTab = 3 }) { Text("Hooks", color = if (toolsTab == 3) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
+            htmlInject = htmlInject,
+            onHtmlChange = { htmlInject = it },
+            applyHtml = {
+                context.getSharedPreferences("rcst_hooks", Context.MODE_PRIVATE).edit().putString("html", htmlInject).apply()
+                webView?.evaluateJavascript("try { eval(`$htmlInject`); } catch(e) {}", null)
+            },
+            context = context
+        )
+    }
+}
+
+@Composable
+private fun WebToolsDialog(
+    onDismiss: () -> Unit,
+    webView: WebView?,
+    requestLogs: List<RequestLog>,
+    toolsTab: Int,
+    onTabChange: (Int) -> Unit,
+    jsInput: String,
+    onJsInputChange: (String) -> Unit,
+    hooksInput: String,
+    onHooksChange: (String) -> Unit,
+    applyHooks: () -> Unit,
+    htmlInject: String,
+    onHtmlChange: (String) -> Unit,
+    applyHtml: () -> Unit,
+    context: Context
+) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize().background(DC.Bg)) {
+            Column(Modifier.fillMaxSize()) {
+                Row(
+                    Modifier.fillMaxWidth().background(DC.Surface).padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, null, tint = DC.White) }
+                    Text("Web Tools", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = DC.White, modifier = Modifier.weight(1f))
+                }
+                
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TabButton("Monitor", toolsTab == 0) { onTabChange(0) }
+                    TabButton("Source", toolsTab == 1) { onTabChange(1) }
+                    TabButton("JS Exec", toolsTab == 2) { onTabChange(2) }
+                    TabButton("Hooks", toolsTab == 3) { onTabChange(3) }
+                }
+                
+                when (toolsTab) {
+                    0 -> MonitorTab(requestLogs, context)
+                    1 -> SourceTab(webView, htmlInject, onHtmlChange, applyHtml)
+                    2 -> JsExecTab(webView, jsInput, onJsInputChange)
+                    3 -> HooksTab(hooksInput, onHooksChange, applyHooks)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TabButton(text: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(8.dp)).background(if (selected) DC.Primary.copy(0.2f) else DC.Card).clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Text(text, fontSize = 11.sp, color = if (selected) DC.Primary else DC.Muted, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+    }
+}
+
+@Composable
+private fun MonitorTab(requestLogs: List<RequestLog>, context: Context) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    
+    if (requestLogs.isEmpty()) {
+        Box(Modifier.fillMaxSize(), Alignment.Center) {
+            Text("No requests intercepted yet", color = DC.Muted)
+        }
+        return
+    }
+    
+    LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(requestLogs) { log ->
+            var expanded by remember { mutableStateOf(false) }
+            val typeColor = when (log.type) {
+                "fetch", "xhr" -> DC.Primary
+                "ws", "ws_send" -> DC.OrbViolet
+                else -> DC.Muted
+            }
+            val statusColor = when {
+                log.status in 200..299 -> DC.Success
+                log.status in 400..599 -> DC.Error
+                log.status == 0 -> DC.Muted
+                else -> DC.Warning
+            }
+            
+            Card(
+                colors = CardDefaults.cardColors(containerColor = DC.Card),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }
+            ) {
+                Column(Modifier.padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.background(typeColor.copy(0.15f), RoundedCornerShape(4.dp)).padding(horizontal = 6.dp, vertical = 2.dp)) {
+                            Text(log.type.uppercase(), fontSize = 9.sp, color = typeColor, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Text(log.method, fontSize = 10.sp, color = DC.White, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                        Spacer(Modifier.width(8.dp))
+                        Text(log.url, fontSize = 10.sp, color = DC.SubText, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        if (log.status > 0) {
+                            Text("${log.status}", fontSize = 10.sp, color = statusColor, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        Icon(if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null, tint = DC.Muted, modifier = Modifier.size(16.dp))
                     }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    when (toolsTab) {
-                        0 -> {
-                            LazyColumn(modifier = Modifier.fillMaxWidth().height(400.dp)) {
-                                items(requestLogs) { log ->
-                                    var expanded by remember { mutableStateOf(false) }
-                                    Column(
-                                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { expanded = !expanded }
-                                    ) {
-                                        Text("${log.method} ${log.type} ${log.url.take(50)}", color = MaterialTheme.colorScheme.onSurface, fontSize = 12.sp)
-                                        if (expanded) {
-                                            Text("URL: ${log.url}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
-                                            Text("Headers: ${log.headers}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
-                                            Text("Req Body: ${log.body}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
-                                            Text("Status: ${log.status}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
-                                            Text("Res Body: ${log.responseBody}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
-                                            
-                                            Row {
-                                                TextButton(onClick = {
-                                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                                    clipboard.setPrimaryClip(ClipData.newPlainText("Headers", log.headers))
-                                                }) { Text("Copy Headers") }
-                                                TextButton(onClick = {
-                                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                                    clipboard.setPrimaryClip(ClipData.newPlainText("Body", log.body))
-                                                }) { Text("Copy Body") }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        1 -> {
-                            Column(modifier = Modifier.fillMaxWidth().height(400.dp)) {
-                                Button(onClick = {
-                                    webView?.evaluateJavascript("(function(){return document.documentElement.outerHTML})()") { result ->
-                                        sourceCode = result?.removeSurrounding("\"")?.replace("\\n", "\n")?.replace("\\\"", "\"") ?: ""
-                                    }
-                                }) { Text("Fetch Source") }
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text("HTML Editor (JS to inject on load):", color = MaterialTheme.colorScheme.onSurface)
-                                OutlinedTextField(
-                                    value = htmlInject,
-                                    onValueChange = { htmlInject = it },
-                                    modifier = Modifier.fillMaxWidth().height(150.dp).verticalScroll(rememberScrollState()),
-                                    textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                                )
-                                Button(onClick = {
-                                    context.getSharedPreferences("rcst_hooks", Context.MODE_PRIVATE).edit().putString("html", htmlInject).apply()
-                                    webView?.evaluateJavascript("try { eval(`$htmlInject`); } catch(e) {}", null)
-                                }) { Text("Apply & Save") }
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text("Source Code:", color = MaterialTheme.colorScheme.onSurface)
-                                Text(text = sourceCode, modifier = Modifier.fillMaxWidth().height(100.dp).verticalScroll(rememberScrollState()), fontSize = 10.sp)
-                            }
-                        }
-                        2 -> {
-                            Column(modifier = Modifier.fillMaxWidth().height(400.dp)) {
-                                Text("Execute JavaScript:", color = MaterialTheme.colorScheme.onSurface)
-                                OutlinedTextField(
-                                    value = jsInput,
-                                    onValueChange = { jsInput = it },
-                                    modifier = Modifier.fillMaxWidth().height(150.dp).verticalScroll(rememberScrollState()),
-                                    textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
-                                    placeholder = { Text("e.g: cloneref(document)") }
-                                )
-                                Button(onClick = {
-                                    webView?.evaluateJavascript(jsInput, null)
-                                }) { Text("Run") }
-                            }
-                        }
-                        3 -> {
-                            Column(modifier = Modifier.fillMaxWidth().height(400.dp)) {
-                                Text("Hook System (JS):", color = MaterialTheme.colorScheme.onSurface)
-                                Text("Use window.addHook(function(req){ ... })", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
-                                Text("req has: method, url, headers, body", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp)
-                                OutlinedTextField(
-                                    value = hooksInput,
-                                    onValueChange = { hooksInput = it },
-                                    modifier = Modifier.fillMaxWidth().height(150.dp).verticalScroll(rememberScrollState()),
-                                    textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace, fontSize = 11.sp),
-                                    placeholder = { Text("window.addHook(function(r){ if(r.headers['Pix']=='1') r.headers['Pix']='0'; });") }
-                                )
-                                Button(onClick = {
-                                    context.getSharedPreferences("rcst_hooks", Context.MODE_PRIVATE).edit().putString("hooks", hooksInput).apply()
-                                    webView?.evaluateJavascript("window.__rcst_user_hooks = `$hooksInput`;", null)
-                                    webView?.reload()
-                                }) { Text("Save & Apply") }
-                            }
+                    if (expanded) {
+                        Spacer(Modifier.height(8.dp))
+                        DetailText("URL:", log.url)
+                        if (log.headers.isNotEmpty() && log.headers != "{}") DetailText("Headers:", log.headers)
+                        if (log.body.isNotEmpty()) DetailText("Body:", log.body)
+                        if (log.responseBody.isNotEmpty()) DetailText("Response:", log.responseBody)
+                        
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { clipboard.setPrimaryClip(ClipData.newPlainText("Headers", log.headers)) }) { Text("Copy Headers", color = DC.Primary, fontSize = 10.sp) }
+                            TextButton(onClick = { clipboard.setPrimaryClip(ClipData.newPlainText("Body", log.body)) }) { Text("Copy Body", color = DC.Primary, fontSize = 10.sp) }
+                            TextButton(onClick = { clipboard.setPrimaryClip(ClipData.newPlainText("Response", log.responseBody)) }) { Text("Copy Response", color = DC.Primary, fontSize = 10.sp) }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun DetailText(label: String, value: String) {
+    if (value.isEmpty() || value == "null") return
+    Text(label, fontSize = 9.sp, color = DC.Primary, fontWeight = FontWeight.Bold)
+    Text(value, fontSize = 9.sp, color = DC.Muted, fontFamily = FontFamily.Monospace, maxLines = 5, overflow = TextOverflow.Ellipsis)
+    Spacer(Modifier.height(4.dp))
+}
+
+@Composable
+private fun SourceTab(webView: WebView?, htmlInject: String, onHtmlChange: (String) -> Unit, applyHtml: () -> Unit) {
+    var sourceCode by remember { mutableStateOf("") }
+    
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Button(
+                onClick = {
+                    webView?.evaluateJavascript("(function(){return document.documentElement.outerHTML})()") { result ->
+                        sourceCode = result?.removeSurrounding("\"")?.replace("\\n", "\n")?.replace("\\\"", "\"")?.replace("\\u003C", "<")?.replace("\\u003E", ">")?.replace("\\/", "/") ?: ""
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = DC.Primary)
+            ) { Text("Fetch Source Code") }
+            Spacer(Modifier.weight(1f))
+            Text("Live HTML Editor (JS)", color = DC.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        }
+        
+        Spacer(Modifier.height(8.dp))
+        
+        OutlinedTextField(
+            value = htmlInject,
+            onValueChange = onHtmlChange,
+            modifier = Modifier.fillMaxWidth().height(100.dp).background(DC.Card),
+            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = DC.White),
+            colors = OutlinedTextFieldDefaults.colors(unfocusedTextColor = DC.White, unfocusedBorderColor = DC.Border, cursorColor = DC.Primary),
+            placeholder = { Text("e.g. document.body.innerHTML += '<h1>Modified</h1>'", color = DC.Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace) }
         )
+        
+        Button(onClick = applyHtml, colors = ButtonDefaults.buttonColors(containerColor = DC.Warning)) { Text("Apply & Save") }
+        
+        Spacer(Modifier.height(16.dp))
+        
+        Text("Source Code:", color = DC.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        
+        LazyColumn(Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp)).background(DC.Card).padding(8.dp)) {
+            if (sourceCode.isEmpty()) {
+                item { Text("Click 'Fetch Source Code' to load...", color = DC.Muted, fontSize = 10.sp) }
+            } else {
+                val lines = sourceCode.lines()
+                itemsIndexed(lines) { index, line ->
+                    Row(Modifier.fillMaxWidth()) {
+                        Text("${index + 1}", color = DC.Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.width(30.dp).padding(end = 8.dp))
+                        Text(parseHtml(line), color = DC.SubText, fontSize = 10.sp, fontFamily = FontFamily.Monospace, overflow = TextOverflow.Visible)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun JsExecTab(webView: WebView?, jsInput: String, onJsInputChange: (String) -> Unit) {
+    var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+    
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Text("Execute JavaScript:", color = DC.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        OutlinedTextField(
+            value = jsInput,
+            onValueChange = {
+                onJsInputChange(it)
+                if (it.endsWith("print(") || it.endsWith("find(") || it.endsWith("highlight(")) {
+                    webView?.evaluateJavascript("(function(){try{return Array.from(document.querySelectorAll('[id], button, a, input, div')).slice(0, 15).map(e=>{return (e.id?'#'+e.id:'<'+e.tagName.toLowerCase()+'>')+(e.innerText.substring(0,10)?': '+e.innerText.substring(0,10):'')})}catch(e){return []}})();") { res ->
+                        try {
+                            val arr = JSONArray(res ?: "[]")
+                            suggestions = (0 until arr.length()).map { arr.getString(it) }
+                        } catch (_: Exception) {
+                            suggestions = emptyList()
+                        }
+                    }
+                } else {
+                    suggestions = emptyList()
+                }
+            },
+            modifier = Modifier.fillMaxWidth().height(150.dp).background(DC.Card),
+            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = DC.White),
+            colors = OutlinedTextFieldDefaults.colors(unfocusedTextColor = DC.White, unfocusedBorderColor = DC.Border, cursorColor = DC.Primary),
+            placeholder = { Text("e.g: print(document)", color = DC.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
+        )
+        
+        if (suggestions.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text("Suggestions (Click to insert & highlight):", color = DC.Warning, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(4.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(suggestions) { sugg ->
+                    val idOrTag = sugg.substringBefore(":").trim()
+                    Box(
+                        Modifier.clip(RoundedCornerShape(8.dp)).background(DC.CardAlt).clickable {
+                            val selector = "'$idOrTag'"
+                            onJsInputChange(jsInput.dropLast(1) + "$selector)")
+                            webView?.evaluateJavascript("try{var e=document.querySelector($selector); if(e){e.style.outline='2px solid cyan'; e.style.backgroundColor='rgba(0,255,255,0.2)'; e.scrollIntoView({behavior:'smooth',block:'center'});}}catch(e){}", null)
+                            suggestions = emptyList()
+                        }.padding(8.dp)
+                    ) {
+                        Text(sugg, color = DC.SubText, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    }
+                }
+            }
+        }
+        
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = { webView?.evaluateJavascript(jsInput, null) },
+            colors = ButtonDefaults.buttonColors(containerColor = DC.Success)
+        ) { Text("Run JS") }
+    }
+}
+
+@Composable
+private fun HooksTab(hooksInput: String, onHooksChange: (String) -> Unit, applyHooks: () -> Unit) {
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Text("Hook System (JS):", color = DC.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Text("Use window.addHook(function(req){ ... })", color = DC.Muted, fontSize = 10.sp)
+        Text("req has: method, url, headers, body", color = DC.Muted, fontSize = 10.sp)
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = hooksInput,
+            onValueChange = onHooksChange,
+            modifier = Modifier.fillMaxWidth().height(200.dp).background(DC.Card),
+            textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = DC.White),
+            colors = OutlinedTextFieldDefaults.colors(unfocusedTextColor = DC.White, unfocusedBorderColor = DC.Border, cursorColor = DC.Primary),
+            placeholder = { Text("window.addHook(function(r){ if(r.headers['Pix']=='1') r.headers['Pix']='0'; });", color = DC.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace) }
+        )
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = applyHooks,
+            colors = ButtonDefaults.buttonColors(containerColor = DC.Primary)
+        ) { Text("Save & Apply Hooks") }
     }
 }

@@ -94,28 +94,48 @@ data class RequestLog(
     val isBlocked: Boolean = false
 )
 
-data class MediaLink(val url: String, val type: String)
+data class MediaLink(val url: String, val type: String, val fileName: String = "")
 
 data class DownloadItem(val id: Long, val title: String, val status: Int, val progress: Int)
 
 data class InspectElement(
     val path: String,
     val tag: String,
+    val id: String,
+    val className: String,
     val text: String,
+    val html: String,
     val href: String,
     val src: String,
+    val alt: String,
+    val value: String,
+    val placeholder: String,
+    val inputType: String,
     val color: String,
-    val bgColor: String
+    val bgColor: String,
+    val fontSize: String,
+    val display: String,
+    val visibility: String,
+    val opacity: String,
+    val attributes: String,
+    val outerHTML: String
 )
 
 data class KeepEdit(
     val path: String,
     val text: String?,
+    val html: String?,
     val href: String?,
     val src: String?,
     val color: String?,
-    val bgColor: String?
+    val bgColor: String?,
+    val fontSize: String?,
+    val display: String?,
+    val visibility: String?,
+    val attributes: Map<String, String>?
 )
+
+data class RedirectEntry(val from: String, val to: String, var blocked: Boolean = false)
 
 class WebHookInterface(
     private val onLog: (String) -> Unit,
@@ -143,6 +163,10 @@ private fun getDownloadStatusText(status: Int): String {
     }
 }
 
+private fun jsString(s: String): String {
+    return "'" + s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "") + "'"
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
@@ -166,10 +190,11 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
     var showMenu     by remember { mutableStateOf(false) }
     
     var inspectorMode by remember { mutableStateOf(false) }
-    var blockRedirects by remember { mutableStateOf(false) }
     var keepsEnabled by remember { mutableStateOf(true) }
     var inspectData by remember { mutableStateOf<InspectElement?>(null) }
     var keepsList by remember { mutableStateOf(mutableListOf<KeepEdit>()) }
+    var redirectsList by remember { mutableStateOf(mutableListOf<RedirectEntry>()) }
+    val blockedRedirectPatterns = remember { mutableStateListOf<String>() }
 
     val prefs = context.getSharedPreferences("rcst_prefs", Context.MODE_PRIVATE)
     var monitorEnabled by remember { mutableStateOf(prefs.getBoolean("monitor_enabled", true)) }
@@ -177,6 +202,7 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
     var requestLogs by remember { mutableStateOf(mutableListOf<RequestLog>()) }
     val blockedKeys = remember { mutableStateListOf<String>() }
     var downloadItems by remember { mutableStateOf(mutableListOf<DownloadItem>()) }
+    val trackedDownloadIds = remember { mutableStateListOf<Long>() }
     
     var logIdCounter by remember { mutableStateOf(0L) }
     var jsInput by remember { mutableStateOf("") }
@@ -189,9 +215,55 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
     val cacheFile = remember { File(context.cacheDir, "rcst_session.json") }
     val hookPrefs = remember { context.getSharedPreferences("rcst_hooks", Context.MODE_PRIVATE) }
     val keepsPrefs = remember { context.getSharedPreferences("rcst_keeps", Context.MODE_PRIVATE) }
+    val redirectsPrefs = remember { context.getSharedPreferences("rcst_redirects", Context.MODE_PRIVATE) }
 
     val desktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     val mobileUA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+    fun saveRedirects() {
+        val arr = JSONArray()
+        blockedRedirectPatterns.forEach { arr.put(it) }
+        redirectsPrefs.edit().putString("blocked", arr.toString()).apply()
+    }
+
+    fun saveKeeps() {
+        val arr = JSONArray()
+        keepsList.forEach { k ->
+            val o = JSONObject()
+            o.put("path", k.path)
+            k.text?.let { o.put("text", it) }
+            k.html?.let { o.put("html", it) }
+            k.href?.let { o.put("href", it) }
+            k.src?.let { o.put("src", it) }
+            k.color?.let { o.put("color", it) }
+            k.bgColor?.let { o.put("bgColor", it) }
+            k.fontSize?.let { o.put("fontSize", it) }
+            k.display?.let { o.put("display", it) }
+            k.visibility?.let { o.put("visibility", it) }
+            k.attributes?.let { attrs ->
+                val attrsObj = JSONObject()
+                attrs.forEach { (k2, v2) -> attrsObj.put(k2, v2) }
+                o.put("attributes", attrsObj)
+            }
+            arr.put(o)
+        }
+        keepsPrefs.edit().putString("keeps", arr.toString()).apply()
+    }
+
+    fun isRedirectBlocked(url: String): Boolean {
+        if (blockedRedirectPatterns.isEmpty()) return false
+        return blockedRedirectPatterns.any { pattern ->
+            try {
+                val regexPattern = pattern
+                    .replace(".", "\\.")
+                    .replace("*", ".*")
+                    .replace("?", "\\?")
+                url.matches(Regex(regexPattern, RegexOption.IGNORE_CASE)) || url.contains(pattern, ignoreCase = true)
+            } catch (_: Exception) {
+                url.contains(pattern, ignoreCase = true)
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         if (cacheFile.exists()) {
@@ -218,43 +290,66 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
             val kList = mutableListOf<KeepEdit>()
             for (i in 0 until keepsArr.length()) {
                 val o = keepsArr.getJSONObject(i)
+                val attrsMap = if (o.has("attributes")) {
+                    val attrsObj = o.getJSONObject("attributes")
+                    val m = mutableMapOf<String, String>()
+                    val keys = attrsObj.keys()
+                    while (keys.hasNext()) { val k = keys.next(); m[k] = attrsObj.getString(k) }
+                    m
+                } else null
                 kList.add(KeepEdit(
                     o.getString("path"),
                     if(o.has("text")) o.getString("text") else null,
+                    if(o.has("html")) o.getString("html") else null,
                     if(o.has("href")) o.getString("href") else null,
                     if(o.has("src")) o.getString("src") else null,
                     if(o.has("color")) o.getString("color") else null,
-                    if(o.has("bgColor")) o.getString("bgColor") else null
+                    if(o.has("bgColor")) o.getString("bgColor") else null,
+                    if(o.has("fontSize")) o.getString("fontSize") else null,
+                    if(o.has("display")) o.getString("display") else null,
+                    if(o.has("visibility")) o.getString("visibility") else null,
+                    attrsMap
                 ))
             }
             keepsList = kList
         } catch (_: Exception) {}
 
+        try {
+            val redirectsArr = JSONArray(redirectsPrefs.getString("blocked", "[]"))
+            for (i in 0 until redirectsArr.length()) {
+                blockedRedirectPatterns.add(redirectsArr.getString(i))
+            }
+        } catch (_: Exception) {}
+
         val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
         while (isActive) {
             try {
-                val query = DownloadManager.Query()
-                val cursor = dm.query(query)
-                val items = mutableListOf<DownloadItem>()
-                while (cursor.moveToNext()) {
-                    val idIdx = cursor.getColumnIndex(DownloadManager.COLUMN_ID)
-                    val titleIdx = cursor.getColumnIndex(DownloadManager.COLUMN_TITLE)
-                    val statusIdx = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
-                    val bytesDownloadedIdx = cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
-                    val bytesTotalIdx = cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
-                    
-                    if (idIdx >= 0 && titleIdx >= 0 && statusIdx >= 0 && bytesDownloadedIdx >= 0 && bytesTotalIdx >= 0) {
-                        val id = cursor.getLong(idIdx)
-                        val title = cursor.getString(titleIdx)
-                        val status = cursor.getInt(statusIdx)
-                        val bytesDownloaded = cursor.getLong(bytesDownloadedIdx)
-                        val bytesTotal = cursor.getLong(bytesTotalIdx)
-                        val prog = if (bytesTotal > 0) (bytesDownloaded * 100 / bytesTotal).toInt() else -1
-                        items.add(DownloadItem(id, title, status, prog))
+                if (trackedDownloadIds.isNotEmpty()) {
+                    val query = DownloadManager.Query()
+                    val ids = trackedDownloadIds.toLongArray()
+                    query.setFilterById(*ids)
+                    val cursor = dm.query(query)
+                    val items = mutableListOf<DownloadItem>()
+                    while (cursor.moveToNext()) {
+                        val idIdx = cursor.getColumnIndex(DownloadManager.COLUMN_ID)
+                        val titleIdx = cursor.getColumnIndex(DownloadManager.COLUMN_TITLE)
+                        val statusIdx = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                        val bytesDownloadedIdx = cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
+                        val bytesTotalIdx = cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
+                        
+                        if (idIdx >= 0 && titleIdx >= 0 && statusIdx >= 0 && bytesDownloadedIdx >= 0 && bytesTotalIdx >= 0) {
+                            val id = cursor.getLong(idIdx)
+                            val title = cursor.getString(titleIdx)
+                            val status = cursor.getInt(statusIdx)
+                            val bytesDownloaded = cursor.getLong(bytesDownloadedIdx)
+                            val bytesTotal = cursor.getLong(bytesTotalIdx)
+                            val prog = if (bytesTotal > 0) (bytesDownloaded * 100 / bytesTotal).toInt() else -1
+                            items.add(DownloadItem(id, title, status, prog))
+                        }
                     }
+                    cursor.close()
+                    downloadItems = items
                 }
-                cursor.close()
-                downloadItems = items
             } catch (_: Exception) {}
             delay(1000)
         }
@@ -294,7 +389,7 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
             
             function isMediaUrl(url) {
                 if(!url) return false;
-                var exts = ['.mp4', '.webm', '.ogg', '.mp3', '.wav', '.m3u8', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp'];
+                var exts = ['.mp4', '.webm', '.ogg', '.mp3', '.wav', '.m3u8', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.avi', '.mov', '.flv', '.wmv', '.m4a', '.aac', '.flac'];
                 var u = url.split('?')[0].split('#')[0].toLowerCase();
                 for(var i=0; i<exts.length; i++) if(u.endsWith(exts[i])) return true;
                 return false;
@@ -302,11 +397,15 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
             
             function scanBodyForMedia(body) {
                 if(!body || typeof body !== 'string') return;
-                var regex = /https?:\/\/[^\s"'<>]+\.(?:mp4|webm|ogg|mp3|wav|m3u8|jpg|jpeg|png|gif|webp|svg|bmp)/gi;
+                var regex = /https?:\/\/[^\s"'<>]+\.(?:mp4|webm|ogg|mp3|wav|m3u8|jpg|jpeg|png|gif|webp|svg|bmp|avi|mov|flv|wmv|m4a|aac|flac)/gi;
                 var matches = body.match(regex);
                 if(matches) {
+                    var seen = new Set();
                     matches.forEach(function(u) {
-                        try { AndroidWebInterface.onMedia(JSON.stringify({type: 'media', mediaType: 'Image', url: u})); } catch(e) {}
+                        if(!seen.has(u)) {
+                            seen.add(u);
+                            try { AndroidWebInterface.onMedia(JSON.stringify({type: 'media', mediaType: 'Image', url: u})); } catch(e) {}
+                        }
                     });
                 }
             }
@@ -397,32 +496,62 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
 
     val inspectJs = """
         (function(){
-            if(window.__rcst_inspector_active) return;
-            window.__rcst_inspector_active = true;
+            if(window.__rcst_inspector_listeners_added) return;
+            window.__rcst_inspector_listeners_added = true;
+            window.__rcst_inspector_active = false;
             document.addEventListener('click', function(e) {
                 if(!window.__rcst_inspector_active) return;
                 e.preventDefault();
                 e.stopPropagation();
+                e.stopImmediatePropagation();
                 var el = e.target;
-                if(window.__rcst_last_el) window.__rcst_last_el.style.outline = window.__rcst_last_outline || '';
-                window.__rcst_last_outline = el.style.outline;
-                el.style.outline = '3px solid #00FFFF';
-                window.__rcst_last_el = el;
-                var path = '';
-                while (el && el.nodeType === 1) {
-                    var sib = Array.prototype.indexOf.call(el.parentNode.children, el) + 1;
-                    path = el.tagName.toLowerCase() + ':nth-child(' + sib + ')' + (path ? ' > ' + path : '');
-                    el = el.parentNode;
+                if(window.__rcst_last_el) {
+                    try { window.__rcst_last_el.style.outline = window.__rcst_last_outline || ''; } catch(err) {}
                 }
-                var target = e.target;
+                try {
+                    window.__rcst_last_outline = el.style.outline;
+                    el.style.outline = '3px solid #00FFFF';
+                    window.__rcst_last_el = el;
+                } catch(err) {}
+                
+                var path = '';
+                var current = el;
+                while (current && current.nodeType === 1 && current !== document.documentElement) {
+                    var sib = current.parentNode ? Array.prototype.indexOf.call(current.parentNode.children, current) + 1 : 1;
+                    var sel = current.tagName.toLowerCase();
+                    if (current.id) sel += '#' + current.id;
+                    path = sel + ':nth-child(' + sib + ')' + (path ? ' > ' + path : '');
+                    current = current.parentNode;
+                }
+                if (!path) path = el.tagName.toLowerCase();
+                
+                var cs = window.getComputedStyle(el);
+                var attrs = {};
+                for (var i = 0; i < el.attributes.length; i++) {
+                    attrs[el.attributes[i].name] = el.attributes[i].value;
+                }
+                
                 var props = {
                     path: path,
-                    tag: target.tagName,
-                    text: target.innerText,
-                    href: target.href || '',
-                    src: target.src || '',
-                    color: window.getComputedStyle(target).color,
-                    bgColor: window.getComputedStyle(target).backgroundColor
+                    tag: el.tagName,
+                    id: el.id || '',
+                    className: el.className || '',
+                    text: (el.innerText || '').substring(0, 500),
+                    html: (el.innerHTML || '').substring(0, 2000),
+                    href: el.href || '',
+                    src: el.src || '',
+                    alt: el.alt || '',
+                    value: el.value || '',
+                    placeholder: el.placeholder || '',
+                    inputType: el.type || '',
+                    color: cs.color,
+                    bgColor: cs.backgroundColor,
+                    fontSize: cs.fontSize,
+                    display: cs.display,
+                    visibility: cs.visibility,
+                    opacity: cs.opacity,
+                    attributes: JSON.stringify(attrs),
+                    outerHTML: (el.outerHTML || '').substring(0, 2000)
                 };
                 try { AndroidWebInterface.onInspect(JSON.stringify(props)); } catch(err) {}
             }, true);
@@ -436,10 +565,19 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
             val o = JSONObject()
             o.put("path", k.path)
             k.text?.let { o.put("text", it) }
+            k.html?.let { o.put("html", it) }
             k.href?.let { o.put("href", it) }
             k.src?.let { o.put("src", it) }
             k.color?.let { o.put("color", it) }
             k.bgColor?.let { o.put("bgColor", it) }
+            k.fontSize?.let { o.put("fontSize", it) }
+            k.display?.let { o.put("display", it) }
+            k.visibility?.let { o.put("visibility", it) }
+            k.attributes?.let { attrs ->
+                val attrsObj = JSONObject()
+                attrs.forEach { (k2, v2) -> attrsObj.put(k2, v2) }
+                o.put("attributes", attrsObj)
+            }
             arr.put(o)
         }
         """
@@ -450,10 +588,19 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                     var el = document.querySelector(k.path);
                     if(el) {
                         if(k.text) el.innerText = k.text;
+                        if(k.html) el.innerHTML = k.html;
                         if(k.href) el.href = k.href;
                         if(k.src) el.src = k.src;
                         if(k.color) el.style.color = k.color;
                         if(k.bgColor) el.style.backgroundColor = k.bgColor;
+                        if(k.fontSize) el.style.fontSize = k.fontSize;
+                        if(k.display) el.style.display = k.display;
+                        if(k.visibility) el.style.visibility = k.visibility;
+                        if(k.attributes) {
+                            for (var attrName in k.attributes) {
+                                el.setAttribute(attrName, k.attributes[attrName]);
+                            }
+                        }
                     }
                 });
             } catch(e) {}
@@ -469,25 +616,72 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
     """
 
     val domMediaExtractorJs = """
-        function extractDomMedia() {
-            let m = {type: 'dom', images:[], videos:[], audios:[]};
-            document.querySelectorAll('img').forEach(e => { 
-                if(e.src && !m.images.includes(e.src)) m.images.push(e.src);
-                if(e.srcset) e.srcset.split(',').forEach(s => { let u = s.trim().split(' ')[0]; if(u && !m.images.includes(u)) m.images.push(u); });
-            });
-            document.querySelectorAll('video, video source').forEach(e => { let src = e.src || e.currentSrc; if(src && !m.videos.includes(src)) m.videos.push(src); });
-            document.querySelectorAll('audio, audio source').forEach(e => { let src = e.src || e.currentSrc; if(src && !m.audios.includes(src)) m.audios.push(src); });
-            try { AndroidWebInterface.onMedia(JSON.stringify(m)); } catch(e) {}
-        }
-        setTimeout(extractDomMedia, 1000);
-        setInterval(extractDomMedia, 3000);
+        (function(){
+            if(window.__rcst_media_extractor) return;
+            window.__rcst_media_extractor = true;
+            function extractDomMedia() {
+                try {
+                    var m = {type: 'dom', images:[], videos:[], audios:[]};
+                    var seen = {};
+                    function addUnique(arr, url) {
+                        if(!url || seen[url]) return;
+                        try { seen[url] = true; arr.push(url); } catch(e) {}
+                    }
+                    document.querySelectorAll('img').forEach(function(e) { 
+                        if(e.src) addUnique(m.images, e.src);
+                        if(e.dataset && e.dataset.src) addUnique(m.images, e.dataset.src);
+                        if(e.dataset && e.dataset.original) addUnique(m.images, e.dataset.original);
+                        if(e.srcset) e.srcset.split(',').forEach(function(s) { var u = s.trim().split(' ')[0]; if(u) addUnique(m.images, u); });
+                    });
+                    document.querySelectorAll('picture source').forEach(function(e) {
+                        if(e.srcset) e.srcset.split(',').forEach(function(s) { var u = s.trim().split(' ')[0]; if(u) addUnique(m.images, u); });
+                    });
+                    document.querySelectorAll('video').forEach(function(e) { 
+                        var src = e.src || e.currentSrc; 
+                        if(src) addUnique(m.videos, src);
+                        if(e.poster) addUnique(m.images, e.poster);
+                    });
+                    document.querySelectorAll('video source').forEach(function(e) { if(e.src) addUnique(m.videos, e.src); });
+                    document.querySelectorAll('audio').forEach(function(e) { var src = e.src || e.currentSrc; if(src) addUnique(m.audios, src); });
+                    document.querySelectorAll('audio source').forEach(function(e) { if(e.src) addUnique(m.audios, e.src); });
+                    document.querySelectorAll('source').forEach(function(e) { 
+                        if(e.src) {
+                            var type = (e.type || '').toLowerCase();
+                            if(type.indexOf('video') >= 0) addUnique(m.videos, e.src);
+                            else if(type.indexOf('audio') >= 0) addUnique(m.audios, e.src);
+                            else addUnique(m.images, e.src);
+                        }
+                    });
+                    document.querySelectorAll('[style*="background-image"]').forEach(function(e) {
+                        var style = e.getAttribute('style') || '';
+                        var match = style.match(/url\\(['"]?([^'")\\)]+)['"]?\\)/);
+                        if(match && match[1]) addUnique(m.images, match[1]);
+                    });
+                    document.querySelectorAll('a[href]').forEach(function(e) {
+                        var href = e.href || '';
+                        var exts = ['.mp4','.webm','.ogg','.mp3','.wav','.m3u8','.jpg','.jpeg','.png','.gif','.webp','.svg','.bmp','.avi','.mov','.flv','.wmv','.m4a','.aac','.flac'];
+                        var lower = href.split('?')[0].split('#')[0].toLowerCase();
+                        for(var i=0;i<exts.length;i++) if(lower.endsWith(exts[i])) {
+                            if(exts[i]==='.mp4'||exts[i]==='.webm'||exts[i]==='.ogg'||exts[i]==='.avi'||exts[i]==='.mov'||exts[i]==='.flv'||exts[i]==='.wmv'||exts[i]==='.m3u8') addUnique(m.videos, href);
+                            else if(exts[i]==='.mp3'||exts[i]==='.wav'||exts[i]==='.m4a'||exts[i]==='.aac'||exts[i]==='.flac') addUnique(m.audios, href);
+                            else addUnique(m.images, href);
+                            break;
+                        }
+                    });
+                    try { AndroidWebInterface.onMedia(JSON.stringify(m)); } catch(e) {}
+                } catch(e) {}
+            }
+            setTimeout(extractDomMedia, 500);
+            setTimeout(extractDomMedia, 2000);
+            setInterval(extractDomMedia, 4000);
+        })();
     """
 
     Column(modifier = Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface)
+                .background(DC.Surface)
                 .statusBarsPadding()
         ) {
             Row(
@@ -540,15 +734,14 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                         leadingIcon = { Icon(imageVector = Icons.Outlined.TouchApp, contentDescription = null) },
                         onClick = {
                             inspectorMode = !inspectorMode
-                            if (inspectorMode) webView?.evaluateJavascript(inspectJs, null)
-                            else webView?.evaluateJavascript("window.__rcst_inspector_active=false; if(window.__rcst_last_el) window.__rcst_last_el.style.outline=window.__rcst_last_outline||'';", null)
+                            if (inspectorMode) {
+                                webView?.evaluateJavascript(inspectJs, null)
+                                webView?.evaluateJavascript("window.__rcst_inspector_active = true;", null)
+                            } else {
+                                webView?.evaluateJavascript("window.__rcst_inspector_active = false; if(window.__rcst_last_el) { try { window.__rcst_last_el.style.outline = window.__rcst_last_outline || ''; } catch(e){} }", null)
+                            }
                             showMenu = false
                         }
-                    )
-                    DropdownMenuItem(
-                        text = { Text(if (blockRedirects) "Desbloquear Redirecionamentos" else "Bloquear Redirecionamentos") },
-                        leadingIcon = { Icon(imageVector = Icons.Outlined.Block, contentDescription = null) },
-                        onClick = { blockRedirects = !blockRedirects; showMenu = false }
                     )
                     DropdownMenuItem(
                         text = { Text(if (keepsEnabled) "Desativar Keeps" else "Ativar Keeps") },
@@ -580,11 +773,22 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                                     canGoBack = view.canGoBack()
                                     canGoForward = view.canGoForward()
                                     onScrolled(false)
-                                    if (url != null) { currentUrl = url; urlInput = url }
+                                    if (url != null) { 
+                                        if (currentUrl != url && currentUrl.isNotEmpty() && !url.startsWith("about:")) {
+                                            redirectsList = redirectsList.toMutableList().also { it.add(0, RedirectEntry(currentUrl, url)) }
+                                            if (redirectsList.size > 50) redirectsList.removeAt(redirectsList.size - 1)
+                                        }
+                                        currentUrl = url
+                                        urlInput = url 
+                                    }
                                     view.evaluateJavascript(discordFixJs, null)
                                     val keysArray = JSONArray()
                                     blockedKeys.forEach { keysArray.put(it) }
                                     view.evaluateJavascript("window.__rcst_blocked = new Set(${keysArray});", null)
+                                    if (inspectorMode) {
+                                        view.evaluateJavascript(inspectJs, null)
+                                        view.evaluateJavascript("window.__rcst_inspector_active = true;", null)
+                                    }
                                 }
                                 override fun onPageFinished(view: WebView, url: String?) {
                                     isLoading = false
@@ -604,24 +808,27 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                                     }
                                     if (inspectorMode) {
                                         view.evaluateJavascript(inspectJs, null)
+                                        view.evaluateJavascript("window.__rcst_inspector_active = true;", null)
                                     }
                                     view.evaluateJavascript(domMediaExtractorJs, null)
                                     
                                     view.evaluateJavascript("""
                                         setTimeout(function() {
-                                            let res = {};
-                                            res.localStorage = JSON.stringify(localStorage);
-                                            res.sessionStorage = JSON.stringify(sessionStorage);
-                                            try { AndroidWebInterface.onMedia('STORAGE:' + JSON.stringify(res)); } catch(e) {}
+                                            try {
+                                                let res = {};
+                                                res.localStorage = JSON.stringify(localStorage);
+                                                res.sessionStorage = JSON.stringify(sessionStorage);
+                                                AndroidWebInterface.onMedia('STORAGE:' + JSON.stringify(res));
+                                            } catch(e) {}
                                         }, 2500);
                                     """, null)
                                 }
                                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                                    if (blockRedirects && request.url.toString() != currentUrl) {
+                                    val targetUrl = request.url.toString()
+                                    if (isRedirectBlocked(targetUrl)) {
                                         return true
                                     }
-                                    view.loadUrl(request.url.toString())
-                                    return true
+                                    return false
                                 }
                             }
                             setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
@@ -637,7 +844,8 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                                     request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                                     request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
                                     val dm = ctx.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-                                    dm.enqueue(request)
+                                    val downloadId = dm.enqueue(request)
+                                    trackedDownloadIds.add(downloadId)
                                 } catch (e: Exception) {
                                     scope.launch(Dispatchers.IO) {
                                         try {
@@ -670,6 +878,7 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                             }
                             webChromeClient = object : WebChromeClient() {
                                 override fun onProgressChanged(view: WebView?, newProgress: Int) { progress = newProgress }
+                                override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean { return true }
                             }
                             settings.apply {
                                 javaScriptEnabled = true
@@ -690,84 +899,96 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                             CookieManager.getInstance().setAcceptCookie(true)
                             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                             
-                            if (monitorEnabled) {
-                                addJavascriptInterface(WebHookInterface(
-                                    onLog = { dataStr ->
-                                        try {
+                            addJavascriptInterface(WebHookInterface(
+                                onLog = { dataStr ->
+                                    try {
+                                        val json = JSONObject(dataStr)
+                                        val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
+                                        val type = json.optString("type")
+                                        val url = json.optString("url")
+                                        val method = json.optString("method")
+                                        val headers = json.optString("headers")
+                                        val body = json.optString("body")
+                                        val status = json.optInt("status", 0)
+                                        val resBody = json.optString("responseBody")
+                                        val isBlocked = json.optBoolean("blocked", false)
+                                        
+                                        val key = "$method:$url"
+                                        
+                                        if (type == "xhr_res" || type == "fetch_res") {
+                                            val pending = pendingRequests.remove(key)
+                                            val finalLog = pending?.copy(status = status, responseBody = resBody) ?: RequestLog(++logIdCounter, ts, type, method, url, headers, body, status, resBody, false)
+                                            requestLogs = requestLogs.toMutableList().also { it.add(0, finalLog) }
+                                            if (requestLogs.size > 200) requestLogs.removeAt(requestLogs.size - 1)
+                                            saveLogsCache()
+                                        } else {
+                                            val reqLog = RequestLog(++logIdCounter, ts, type, method, url, headers, body, 0, "", isBlocked)
+                                            pendingRequests[key] = reqLog
+                                            requestLogs = requestLogs.toMutableList().also { it.add(0, reqLog) }
+                                            if (requestLogs.size > 200) requestLogs.removeAt(requestLogs.size - 1)
+                                            saveLogsCache()
+                                        }
+                                    } catch (_: Exception) {}
+                                },
+                                onMedia = { dataStr ->
+                                    try {
+                                        if (dataStr.startsWith("STORAGE:")) {
+                                            val json = JSONObject(dataStr.substringAfter("STORAGE:"))
+                                            val ls = json.optString("localStorage")
+                                            val ss = json.optString("sessionStorage")
+                                            val cookies = CookieManager.getInstance().getCookie(currentUrl)
+                                            storageData = "Cookies:\n${cookies ?: "None"}\n\nLocal Storage:\n$ls\n\nSession Storage:\n$ss"
+                                        } else {
                                             val json = JSONObject(dataStr)
-                                            val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
                                             val type = json.optString("type")
-                                            val url = json.optString("url")
-                                            val method = json.optString("method")
-                                            val headers = json.optString("headers")
-                                            val body = json.optString("body")
-                                            val status = json.optInt("status", 0)
-                                            val resBody = json.optString("responseBody")
-                                            val isBlocked = json.optBoolean("blocked", false)
-                                            
-                                            val key = "$method:$url"
-                                            
-                                            if (type == "xhr_res" || type == "fetch_res") {
-                                                val pending = pendingRequests.remove(key)
-                                                val finalLog = pending?.copy(status = status, responseBody = resBody) ?: RequestLog(++logIdCounter, ts, type, method, url, headers, body, status, resBody, false)
-                                                requestLogs = requestLogs.toMutableList().also { it.add(0, finalLog) }
-                                                if (requestLogs.size > 200) requestLogs.removeAt(requestLogs.size - 1)
-                                                saveLogsCache()
-                                            } else {
-                                                val reqLog = RequestLog(++logIdCounter, ts, type, method, url, headers, body, 0, "", isBlocked)
-                                                pendingRequests[key] = reqLog
-                                                requestLogs = requestLogs.toMutableList().also { it.add(0, reqLog) }
-                                                if (requestLogs.size > 200) requestLogs.removeAt(requestLogs.size - 1)
-                                                saveLogsCache()
-                                            }
-                                        } catch (_: Exception) {}
-                                    },
-                                    onMedia = { dataStr ->
-                                        try {
-                                            if (dataStr.startsWith("STORAGE:")) {
-                                                val json = JSONObject(dataStr.substringAfter("STORAGE:"))
-                                                val ls = json.optString("localStorage")
-                                                val ss = json.optString("sessionStorage")
-                                                val cookies = CookieManager.getInstance().getCookie(currentUrl)
-                                                storageData = "Cookies:\n${cookies ?: "None"}\n\nLocal Storage:\n$ls\n\nSession Storage:\n$ss"
-                                            } else {
-                                                val json = JSONObject(dataStr)
-                                                val type = json.optString("type")
-                                                if (type == "media") {
-                                                    val mediaType = json.optString("mediaType")
-                                                    val url = json.optString("url")
-                                                    if (url.isNotEmpty() && mediaLinks.none { it.url == url }) {
-                                                        mediaLinks = mediaLinks.toMutableList().also { it.add(0, MediaLink(url, mediaType)) }
-                                                    }
-                                                } else if (type == "dom") {
-                                                    val currentUrls = mediaLinks.map { it.url }.toMutableSet()
-                                                    val newList = mediaLinks.toMutableList()
-                                                    
-                                                    json.optJSONArray("images")?.let { for (i in 0 until it.length()) { val u = it.getString(i); if (u.isNotEmpty() && !currentUrls.contains(u)) { newList.add(MediaLink(u, "Image")); currentUrls.add(u) } } }
-                                                    json.optJSONArray("videos")?.let { for (i in 0 until it.length()) { val u = it.getString(i); if (u.isNotEmpty() && !currentUrls.contains(u)) { newList.add(MediaLink(u, "Video")); currentUrls.add(u) } } }
-                                                    json.optJSONArray("audios")?.let { for (i in 0 until it.length()) { val u = it.getString(i); if (u.isNotEmpty() && !currentUrls.contains(u)) { newList.add(MediaLink(u, "Audio")); currentUrls.add(u) } } }
-                                                    
-                                                    mediaLinks = newList
+                                            if (type == "media") {
+                                                val mediaType = json.optString("mediaType")
+                                                val url = json.optString("url")
+                                                if (url.isNotEmpty() && mediaLinks.none { it.url == url }) {
+                                                    val fileName = URLUtil.guessFileName(url, null, null)
+                                                    mediaLinks = mediaLinks.toMutableList().also { it.add(0, MediaLink(url, mediaType, fileName)) }
                                                 }
+                                            } else if (type == "dom") {
+                                                val currentUrls = mediaLinks.map { it.url }.toMutableSet()
+                                                val newList = mediaLinks.toMutableList()
+                                                
+                                                json.optJSONArray("images")?.let { for (i in 0 until it.length()) { val u = it.getString(i); if (u.isNotEmpty() && !currentUrls.contains(u)) { newList.add(MediaLink(u, "Image", URLUtil.guessFileName(u, null, null))); currentUrls.add(u) } } }
+                                                json.optJSONArray("videos")?.let { for (i in 0 until it.length()) { val u = it.getString(i); if (u.isNotEmpty() && !currentUrls.contains(u)) { newList.add(MediaLink(u, "Video", URLUtil.guessFileName(u, null, null))); currentUrls.add(u) } } }
+                                                json.optJSONArray("audios")?.let { for (i in 0 until it.length()) { val u = it.getString(i); if (u.isNotEmpty() && !currentUrls.contains(u)) { newList.add(MediaLink(u, "Audio", URLUtil.guessFileName(u, null, null))); currentUrls.add(u) } } }
+                                                
+                                                mediaLinks = newList
                                             }
-                                        } catch (_: Exception) {}
-                                    },
-                                    onInspect = { dataStr ->
-                                        try {
-                                            val json = JSONObject(dataStr)
-                                            inspectData = InspectElement(
-                                                json.getString("path"),
-                                                json.getString("tag"),
-                                                json.optString("text"),
-                                                json.optString("href"),
-                                                json.optString("src"),
-                                                json.optString("color"),
-                                                json.optString("bgColor")
-                                            )
-                                        } catch (_: Exception) {}
-                                    }
-                                ), "AndroidWebInterface")
-                            }
+                                        }
+                                    } catch (_: Exception) {}
+                                },
+                                onInspect = { dataStr ->
+                                    try {
+                                        val json = JSONObject(dataStr)
+                                        inspectData = InspectElement(
+                                            json.optString("path"),
+                                            json.optString("tag"),
+                                            json.optString("id"),
+                                            json.optString("className"),
+                                            json.optString("text"),
+                                            json.optString("html"),
+                                            json.optString("href"),
+                                            json.optString("src"),
+                                            json.optString("alt"),
+                                            json.optString("value"),
+                                            json.optString("placeholder"),
+                                            json.optString("inputType"),
+                                            json.optString("color"),
+                                            json.optString("bgColor"),
+                                            json.optString("fontSize"),
+                                            json.optString("display"),
+                                            json.optString("visibility"),
+                                            json.optString("opacity"),
+                                            json.optString("attributes"),
+                                            json.optString("outerHTML")
+                                        )
+                                    } catch (_: Exception) {}
+                                }
+                            ), "AndroidWebInterface")
                             loadUrl(homeUrl)
                             webView = this
                         }
@@ -821,6 +1042,28 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                         storageData = storageData,
                         downloadItems = downloadItems,
                         keepsList = keepsList,
+                        onDeleteKeep = { keep ->
+                            keepsList = keepsList.toMutableList().also { it.remove(keep) }
+                            saveKeeps()
+                        },
+                        redirectsList = redirectsList,
+                        blockedRedirectPatterns = blockedRedirectPatterns,
+                        onBlockRedirect = { pattern ->
+                            if (!blockedRedirectPatterns.contains(pattern)) {
+                                blockedRedirectPatterns.add(pattern)
+                                saveRedirects()
+                            }
+                        },
+                        onUnblockRedirect = { pattern ->
+                            blockedRedirectPatterns.remove(pattern)
+                            saveRedirects()
+                        },
+                        onAddRedirectPattern = { pattern ->
+                            if (pattern.isNotEmpty() && !blockedRedirectPatterns.contains(pattern)) {
+                                blockedRedirectPatterns.add(pattern)
+                                saveRedirects()
+                            }
+                        },
                         downloadHtml = {
                             webView?.evaluateJavascript("(function(){return document.documentElement.outerHTML})()") { result ->
                                 val html = result?.removeSurrounding("\"")?.replace("\\n", "\n")?.replace("\\\"", "\"") ?: ""
@@ -876,6 +1119,19 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                                 blockedKeys.remove(key)
                                 webView?.evaluateJavascript("window.__rcst_blocked.delete($jsKey);", null)
                             }
+                        },
+                        onDownloadMedia = { url ->
+                            try {
+                                val fileName = URLUtil.guessFileName(url, null, null)
+                                val request = DownloadManager.Request(Uri.parse(url))
+                                request.setTitle(fileName)
+                                request.setDescription("Mídia extraída pelo RCST")
+                                request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                                val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                                val id = dm.enqueue(request)
+                                trackedDownloadIds.add(id)
+                            } catch (_: Exception) {}
                         }
                     )
                 }
@@ -887,35 +1143,37 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
         InspectorDialog(
             data = data,
             onDismiss = { inspectData = null },
-            onApply = { newText, newHref, newSrc, newColor, newBgColor, keep ->
+            onApply = { newText, newHtml, newHref, newSrc, newColor, newBgColor, newFontSize, newDisplay, newVisibility, newAttrs, keep ->
+                val attrsJs = if (newAttrs != null && newAttrs.isNotEmpty()) {
+                    newAttrs.entries.joinToString("") { (k, v) -> 
+                        "el.setAttribute(${jsString(k)}, ${jsString(v)});" 
+                    }
+                } else ""
                 val js = """
                     (function(){
-                        var el = document.querySelector('${data.path}');
+                        var el = document.querySelector(${jsString(data.path)});
                         if(el) {
-                            ${if(newText != null) "el.innerText = '$newText';" else ""}
-                            ${if(newHref != null) "el.href = '$newHref';" else ""}
-                            ${if(newSrc != null) "el.src = '$newSrc';" else ""}
-                            ${if(newColor != null) "el.style.color = '$newColor';" else ""}
-                            ${if(newBgColor != null) "el.style.backgroundColor = '$newBgColor';" else ""}
+                            ${if(newText != null) "el.innerText = ${jsString(newText)};" else ""}
+                            ${if(newHtml != null) "el.innerHTML = ${jsString(newHtml)};" else ""}
+                            ${if(newHref != null) "el.href = ${jsString(newHref)};" else ""}
+                            ${if(newSrc != null) "el.src = ${jsString(newSrc)};" else ""}
+                            ${if(newColor != null) "el.style.color = ${jsString(newColor)};" else ""}
+                            ${if(newBgColor != null) "el.style.backgroundColor = ${jsString(newBgColor)};" else ""}
+                            ${if(newFontSize != null) "el.style.fontSize = ${jsString(newFontSize)};" else ""}
+                            ${if(newDisplay != null) "el.style.display = ${jsString(newDisplay)};" else ""}
+                            ${if(newVisibility != null) "el.style.visibility = ${jsString(newVisibility)};" else ""}
+                            $attrsJs
                         }
                     })();
                 """
                 webView?.evaluateJavascript(js, null)
                 if (keep) {
-                    val newKeep = KeepEdit(data.path, newText, newHref, newSrc, newColor, newBgColor)
-                    keepsList.add(newKeep)
-                    val arr = JSONArray()
-                    keepsList.forEach { k ->
-                        val o = JSONObject()
-                        o.put("path", k.path)
-                        k.text?.let { o.put("text", it) }
-                        k.href?.let { o.put("href", it) }
-                        k.src?.let { o.put("src", it) }
-                        k.color?.let { o.put("color", it) }
-                        k.bgColor?.let { o.put("bgColor", it) }
-                        arr.put(o)
+                    val newKeep = KeepEdit(data.path, newText, newHtml, newHref, newSrc, newColor, newBgColor, newFontSize, newDisplay, newVisibility, newAttrs)
+                    keepsList = keepsList.toMutableList().also { 
+                        it.removeAll { k -> k.path == data.path }
+                        it.add(newKeep) 
                     }
-                    keepsPrefs.edit().putString("keeps", arr.toString()).apply()
+                    saveKeeps()
                 }
                 inspectData = null
             }
@@ -927,60 +1185,177 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
 private fun InspectorDialog(
     data: InspectElement,
     onDismiss: () -> Unit,
-    onApply: (String?, String?, String?, String?, String?, Boolean) -> Unit
+    onApply: (String?, String?, String?, String?, String?, String?, String?, String?, String?, Map<String, String>?, Boolean) -> Unit
 ) {
+    var dialogTab by remember { mutableIntStateOf(0) }
     var text by remember { mutableStateOf(data.text) }
+    var html by remember { mutableStateOf(data.html) }
     var href by remember { mutableStateOf(data.href) }
     var src by remember { mutableStateOf(data.src) }
+    var alt by remember { mutableStateOf(data.alt) }
+    var value by remember { mutableStateOf(data.value) }
+    var placeholder by remember { mutableStateOf(data.placeholder) }
+    var inputType by remember { mutableStateOf(data.inputType) }
     var color by remember { mutableStateOf(data.color) }
     var bgColor by remember { mutableStateOf(data.bgColor) }
+    var fontSize by remember { mutableStateOf(data.fontSize) }
+    var display by remember { mutableStateOf(data.display) }
+    var visibility by remember { mutableStateOf(data.visibility) }
+    var opacity by remember { mutableStateOf(data.opacity) }
+    var id by remember { mutableStateOf(data.id) }
+    var className by remember { mutableStateOf(data.className) }
     var keep by remember { mutableStateOf(false) }
+    
+    var attrMap by remember { 
+        mutableStateOf(
+            try { 
+                JSONObject(data.attributes).let { m -> 
+                    val map = mutableMapOf<String, String>()
+                    val keys = m.keys()
+                    while(keys.hasNext()) { val k = keys.next(); map[k] = m.getString(k) }
+                    map
+                } 
+            } 
+            catch (_: Exception) { mutableMapOf() }
+        ) 
+    }
+    var newAttrKey by remember { mutableStateOf("") }
+    var newAttrValue by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Inspetor de Elemento", color = DC.White) },
+        title = { 
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(imageVector = Icons.Outlined.Code, contentDescription = null, tint = DC.Primary, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Inspetor de Elemento", color = DC.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            }
+        },
         containerColor = DC.Card,
         text = {
-            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-                Text("Tag: ${data.tag}", color = DC.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
-                Text("Path: ${data.path}", color = DC.Muted, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-                Spacer(Modifier.height(8.dp))
+            Column(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf("Atributos", "Estilo", "Conteúdo", "Avançado").forEachIndexed { idx, tab ->
+                        TabButton(tab, dialogTab == idx) { dialogTab = idx }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
                 
-                OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("Texto") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                if (data.href.isNotEmpty()) {
-                    Spacer(Modifier.height(4.dp))
-                    OutlinedTextField(value = href, onValueChange = { href = it }, label = { Text("Link (href)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+                Box(modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                    when (dialogTab) {
+                        0 -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            InfoRow("Tag", data.tag)
+                            OutlinedTextField(value = id, onValueChange = { id = it }, label = { Text("ID") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            OutlinedTextField(value = className, onValueChange = { className = it }, label = { Text("Class") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            if (data.href.isNotEmpty() || href.isNotEmpty()) {
+                                OutlinedTextField(value = href, onValueChange = { href = it }, label = { Text("Link (href)") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            }
+                            if (data.src.isNotEmpty() || src.isNotEmpty()) {
+                                OutlinedTextField(value = src, onValueChange = { src = it }, label = { Text("Source (src)") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            }
+                            if (data.alt.isNotEmpty() || alt.isNotEmpty()) {
+                                OutlinedTextField(value = alt, onValueChange = { alt = it }, label = { Text("Alt") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            }
+                            if (data.value.isNotEmpty() || value.isNotEmpty()) {
+                                OutlinedTextField(value = value, onValueChange = { value = it }, label = { Text("Value") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            }
+                            if (data.placeholder.isNotEmpty() || placeholder.isNotEmpty()) {
+                                OutlinedTextField(value = placeholder, onValueChange = { placeholder = it }, label = { Text("Placeholder") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            }
+                            if (data.inputType.isNotEmpty()) {
+                                OutlinedTextField(value = inputType, onValueChange = { inputType = it }, label = { Text("Type") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            }
+                            
+                            Spacer(Modifier.height(4.dp))
+                            Text("Atributos Customizados:", color = DC.Primary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            attrMap.forEach { (k, v) ->
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                    Text("$k:", color = DC.White, fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.width(80.dp))
+                                    OutlinedTextField(value = v, onValueChange = { attrMap = attrMap.toMutableMap().also { m -> m[k] = it } }, modifier = Modifier.weight(1f), singleLine = true, textStyle = TextStyle(fontSize = 10.sp, color = DC.White))
+                                    IconButton(onClick = { attrMap = attrMap.toMutableMap().also { m -> m.remove(k) } }, modifier = Modifier.size(24.dp)) {
+                                        Icon(Icons.Outlined.Close, contentDescription = null, tint = DC.Error, modifier = Modifier.size(14.dp))
+                                    }
+                                }
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedTextField(value = newAttrKey, onValueChange = { newAttrKey = it }, label = { Text("chave") }, modifier = Modifier.weight(1f), singleLine = true, textStyle = TextStyle(fontSize = 10.sp, color = DC.White))
+                                Spacer(Modifier.width(4.dp))
+                                OutlinedTextField(value = newAttrValue, onValueChange = { newAttrValue = it }, label = { Text("valor") }, modifier = Modifier.weight(1f), singleLine = true, textStyle = TextStyle(fontSize = 10.sp, color = DC.White))
+                                Spacer(Modifier.width(4.dp))
+                                IconButton(onClick = { 
+                                    if (newAttrKey.isNotEmpty()) {
+                                        attrMap = attrMap.toMutableMap().also { it[newAttrKey] = newAttrValue }
+                                        newAttrKey = ""
+                                        newAttrValue = ""
+                                    }
+                                }) {
+                                    Icon(Icons.Outlined.Add, contentDescription = null, tint = DC.Success)
+                                }
+                            }
+                        }
+                        1 -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedTextField(value = color, onValueChange = { color = it }, label = { Text("Cor do Texto") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            OutlinedTextField(value = bgColor, onValueChange = { bgColor = it }, label = { Text("Cor de Fundo") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            OutlinedTextField(value = fontSize, onValueChange = { fontSize = it }, label = { Text("Tamanho da Fonte") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            OutlinedTextField(value = display, onValueChange = { display = it }, label = { Text("Display") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            OutlinedTextField(value = visibility, onValueChange = { visibility = it }, label = { Text("Visibility") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            OutlinedTextField(value = opacity, onValueChange = { opacity = it }, label = { Text("Opacity") }, modifier = Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                        }
+                        2 -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedTextField(value = text, onValueChange = { text = it }, label = { Text("Texto (innerText)") }, modifier = Modifier.fillMaxWidth(), textStyle = TextStyle(fontSize = 11.sp, color = DC.White))
+                            OutlinedTextField(value = html, onValueChange = { html = it }, label = { Text("HTML (innerHTML)") }, modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp), textStyle = TextStyle(fontSize = 11.sp, color = DC.White, fontFamily = FontFamily.Monospace))
+                        }
+                        3 -> Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            InfoRow("Path", data.path)
+                            InfoRow("Outer HTML", data.outerHTML.take(500))
+                        }
+                    }
                 }
-                if (data.src.isNotEmpty()) {
-                    Spacer(Modifier.height(4.dp))
-                    OutlinedTextField(value = src, onValueChange = { src = it }, label = { Text("Source (src)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                }
-                Spacer(Modifier.height(4.dp))
-                OutlinedTextField(value = color, onValueChange = { color = it }, label = { Text("Cor do Texto") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-                Spacer(Modifier.height(4.dp))
-                OutlinedTextField(value = bgColor, onValueChange = { bgColor = it }, label = { Text("Cor de Fundo") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
                 
                 Spacer(Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = keep, onCheckedChange = { keep = it })
-                    Text("Keep edit on reload", color = DC.White, fontSize = 12.sp)
+                    Text("Keep (manter edição sempre)", color = DC.White, fontSize = 11.sp)
                 }
             }
         },
         confirmButton = {
             Button(onClick = { 
+                val finalAttrs = if (id != data.id || className != data.className || attrMap.isNotEmpty()) {
+                    val m = attrMap.toMutableMap()
+                    if (id != data.id) m["id"] = id
+                    if (className != data.className) m["class"] = className
+                    if (data.alt.isNotEmpty() && alt != data.alt) m["alt"] = alt
+                    if (data.value.isNotEmpty() && value != data.value) m["value"] = value
+                    if (data.placeholder.isNotEmpty() && placeholder != data.placeholder) m["placeholder"] = placeholder
+                    if (data.inputType.isNotEmpty() && inputType != data.inputType) m["type"] = inputType
+                    if (m.isNotEmpty()) m else null
+                } else null
                 onApply(
                     if(text != data.text) text else null,
-                    if(href != data.href && data.href.isNotEmpty()) href else null,
-                    if(src != data.src && data.src.isNotEmpty()) src else null,
+                    if(html != data.html) html else null,
+                    if(href != data.href && (data.href.isNotEmpty() || href.isNotEmpty())) href else null,
+                    if(src != data.src && (data.src.isNotEmpty() || src.isNotEmpty())) src else null,
                     if(color != data.color) color else null,
                     if(bgColor != data.bgColor) bgColor else null,
+                    if(fontSize != data.fontSize) fontSize else null,
+                    if(display != data.display) display else null,
+                    if(visibility != data.visibility) visibility else null,
+                    finalAttrs,
                     keep
                 ) 
-            }) { Text("Aplicar") }
+            }, colors = ButtonDefaults.buttonColors(containerColor = DC.Primary)) { Text("Aplicar") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar", color = DC.Muted) } }
     )
+}
+
+@Composable
+private fun InfoRow(label: String, value: String) {
+    Column {
+        Text(label, color = DC.Primary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+        Text(value, color = DC.SubText, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 3, overflow = TextOverflow.Ellipsis)
+    }
 }
 
 @Composable
@@ -1002,13 +1377,21 @@ private fun WebToolsPanel(
     storageData: String,
     downloadItems: List<DownloadItem>,
     keepsList: List<KeepEdit>,
+    onDeleteKeep: (KeepEdit) -> Unit,
+    redirectsList: List<RedirectEntry>,
+    blockedRedirectPatterns: List<String>,
+    onBlockRedirect: (String) -> Unit,
+    onUnblockRedirect: (String) -> Unit,
+    onAddRedirectPattern: (String) -> Unit,
     downloadHtml: () -> Unit,
     downloadSiteZip: () -> Unit,
     blockedKeys: List<String>,
-    onBlockToggle: (String, Boolean) -> Unit
+    onBlockToggle: (String, Boolean) -> Unit,
+    onDownloadMedia: (String) -> Unit
 ) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    val tabsList = listOf("Monitor", "Source", "JS", "Hooks", "Plugins", "Media", "Storage", "Downloads", "Keeps")
+    val tabsList = listOf("Monitor", "Source", "JS", "Hooks", "Plugins", "Media", "Storage", "Downloads", "Keeps", "Redirects")
+    var newRedirectPattern by remember { mutableStateOf("") }
     
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -1123,7 +1506,10 @@ private fun WebToolsPanel(
             }
             5 -> {
                 Column(Modifier.fillMaxSize().padding(8.dp)) {
-                    Text("Media Extractor (DOM + Requests):", color = DC.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Media Extractor:", color = DC.White, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        Text("${mediaLinks.size} items", color = DC.Muted, fontSize = 10.sp)
+                    }
                     Spacer(Modifier.height(8.dp))
                     if (mediaLinks.isEmpty()) {
                         Text("No media found on this page.", color = DC.Muted, fontSize = 11.sp)
@@ -1139,23 +1525,14 @@ private fun WebToolsPanel(
                                             )
                                             Spacer(Modifier.width(8.dp))
                                             Text(media.type, color = DC.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                            Spacer(Modifier.weight(1f))
+                                            Text(media.fileName, color = DC.Muted, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
                                         Spacer(Modifier.height(4.dp))
                                         Text(media.url, color = DC.SubText, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                         Row {
                                             TextButton(onClick = { clipboard.setPrimaryClip(ClipData.newPlainText("Media URL", media.url)) }) { Text("Copy URL", color = DC.Primary, fontSize = 10.sp) }
-                                            TextButton(onClick = {
-                                                try {
-                                                    val fileName = URLUtil.guessFileName(media.url, null, null)
-                                                    val request = DownloadManager.Request(Uri.parse(media.url))
-                                                    request.setTitle(fileName)
-                                                    request.setDescription("Mídia extraída pelo RCST")
-                                                    request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                                                    request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-                                                    val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-                                                    dm.enqueue(request)
-                                                } catch (_: Exception) {}
-                                            }) { Text("Download", color = DC.Success, fontSize = 10.sp) }
+                                            TextButton(onClick = { onDownloadMedia(media.url) }) { Text("Download", color = DC.Success, fontSize = 10.sp) }
                                         }
                                     }
                                 }
@@ -1215,10 +1592,81 @@ private fun WebToolsPanel(
                             items(keepsList) { keep ->
                                 Card(colors = CardDefaults.cardColors(containerColor = DC.Card), modifier = Modifier.fillMaxWidth()) {
                                     Column(Modifier.padding(8.dp)) {
-                                        Text(keep.path, color = DC.SubText, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(keep.path, color = DC.SubText, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                            IconButton(onClick = { onDeleteKeep(keep) }, modifier = Modifier.size(20.dp)) {
+                                                Icon(Icons.Outlined.Delete, contentDescription = null, tint = DC.Error, modifier = Modifier.size(14.dp))
+                                            }
+                                        }
                                         keep.text?.let { Text("Texto: $it", color = DC.White, fontSize = 10.sp) }
+                                        keep.html?.let { Text("HTML: ${it.take(80)}", color = DC.White, fontSize = 10.sp) }
                                         keep.href?.let { Text("Link: $it", color = DC.White, fontSize = 10.sp) }
                                         keep.color?.let { Text("Cor: $it", color = DC.White, fontSize = 10.sp) }
+                                        keep.bgColor?.let { Text("Fundo: $it", color = DC.White, fontSize = 10.sp) }
+                                        keep.fontSize?.let { Text("Fonte: $it", color = DC.White, fontSize = 10.sp) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            9 -> {
+                Column(Modifier.fillMaxSize().padding(8.dp)) {
+                    Text("Redirecionamentos:", color = DC.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = newRedirectPattern, onValueChange = { newRedirectPattern = it },
+                            modifier = Modifier.weight(1f), singleLine = true,
+                            textStyle = TextStyle(fontSize = 11.sp, color = DC.White),
+                            placeholder = { Text("URL ou padrão (* curinga)...", color = DC.Muted, fontSize = 11.sp) },
+                            colors = OutlinedTextFieldDefaults.colors(unfocusedBorderColor = DC.Border, focusedBorderColor = DC.Primary)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Button(onClick = { 
+                            onAddRedirectPattern(newRedirectPattern)
+                            newRedirectPattern = ""
+                        }, colors = ButtonDefaults.buttonColors(containerColor = DC.Primary)) { Text("Bloquear") }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text("Padrões bloqueados:", color = DC.Primary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    if (blockedRedirectPatterns.isEmpty()) {
+                        Text("Nenhum padrão bloqueado.", color = DC.Muted, fontSize = 10.sp)
+                    } else {
+                        blockedRedirectPatterns.forEach { pattern ->
+                            Card(colors = CardDefaults.cardColors(containerColor = DC.Card), modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                                Row(Modifier.padding(8.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Outlined.Block, contentDescription = null, tint = DC.Error, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(pattern, color = DC.White, fontSize = 10.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    IconButton(onClick = { onUnblockRedirect(pattern) }, modifier = Modifier.size(20.dp)) {
+                                        Icon(Icons.Outlined.Close, contentDescription = null, tint = DC.Muted, modifier = Modifier.size(14.dp))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text("Redirecionamentos detectados:", color = DC.Warning, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(4.dp))
+                    if (redirectsList.isEmpty()) {
+                        Text("Nenhum redirecionamento detectado.", color = DC.Muted, fontSize = 10.sp)
+                    } else {
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            items(redirectsList) { redirect ->
+                                Card(colors = CardDefaults.cardColors(containerColor = DC.Card), modifier = Modifier.fillMaxWidth()) {
+                                    Column(Modifier.padding(8.dp)) {
+                                        Text("De: ${redirect.from}", color = DC.Muted, fontSize = 9.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text("Para: ${redirect.to}", color = DC.SubText, fontSize = 9.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Row {
+                                            TextButton(onClick = { onBlockRedirect(redirect.to) }) { 
+                                                Text("Bloquear destino", color = DC.Error, fontSize = 9.sp) 
+                                            }
+                                            TextButton(onClick = { clipboard.setPrimaryClip(ClipData.newPlainText("URL", redirect.to)) }) { 
+                                                Text("Copiar", color = DC.Primary, fontSize = 9.sp) 
+                                            }
+                                        }
                                     }
                                 }
                             }

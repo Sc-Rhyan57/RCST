@@ -7,11 +7,6 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.compose.runtime.collectAsState
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -26,20 +21,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.rhyan57.rcst.MainViewModel
-import com.rhyan57.rcst.ui.theme.AppColors
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
-    val homeUrl         by vm.homeUrl.collectAsState()
-    val jsEnabled       by vm.javascriptEnabled.collectAsState()
-    val desktopSite     by vm.desktopSite.collectAsState()
+    val homeUrl     by vm.homeUrl.collectAsState()
+    val jsEnabled   by vm.javascriptEnabled.collectAsState()
+    val desktopSite by vm.desktopSite.collectAsState()
 
-    var webView: WebView? by remember { mutableStateOf(null) }
-    var canGoBack        by remember { mutableStateOf(false) }
-    var canGoForward     by remember { mutableStateOf(false) }
-    var isLoading        by remember { mutableStateOf(true) }
-    var progress         by remember { mutableStateOf(0) }
+    var webView      by remember { mutableStateOf<WebView?>(null) }
+    var canGoBack    by remember { mutableStateOf(false) }
+    var canGoForward by remember { mutableStateOf(false) }
+    var isLoading    by remember { mutableStateOf(true) }
+    var progress     by remember { mutableStateOf(0) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         Box(
@@ -55,24 +49,18 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                     .padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(
-                    onClick = { webView?.goBack() },
-                    enabled = canGoBack
-                ) {
+                IconButton(onClick = { webView?.goBack() }, enabled = canGoBack) {
                     Icon(
                         Icons.Outlined.ArrowBack,
                         contentDescription = "Back",
-                        tint = if (canGoBack) MaterialTheme.colorScheme.onSurface else AppColors.TextMuted
+                        tint = if (canGoBack) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
                     )
                 }
-                IconButton(
-                    onClick = { webView?.goForward() },
-                    enabled = canGoForward
-                ) {
+                IconButton(onClick = { webView?.goForward() }, enabled = canGoForward) {
                     Icon(
                         Icons.Outlined.ArrowForward,
                         contentDescription = "Forward",
-                        tint = if (canGoForward) MaterialTheme.colorScheme.onSurface else AppColors.TextMuted
+                        tint = if (canGoForward) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
                     )
                 }
                 Spacer(Modifier.weight(1f))
@@ -109,13 +97,11 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                                 canGoForward = view.canGoForward()
                                 onScrolled(false)
                             }
-
                             override fun onPageFinished(view: WebView, url: String?) {
                                 isLoading = false
                                 canGoBack = view.canGoBack()
                                 canGoForward = view.canGoForward()
                             }
-
                             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                                 view.loadUrl(request.url.toString())
                                 return true
@@ -154,12 +140,7 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                 modifier = Modifier.fillMaxSize()
             )
 
-            AnimatedVisibility(
-                visible = isLoading && progress < 30,
-                enter = fadeIn(tween(200)),
-                exit = fadeOut(tween(300)),
-                modifier = Modifier.fillMaxSize()
-            ) {
+            if (isLoading && progress < 30) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()

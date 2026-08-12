@@ -495,10 +495,10 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = { webView?.goBack() }, enabled = canGoBack) {
-                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back", tint = if (canGoBack) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
+                    Icon(imageVector = Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back", tint = if (canGoBack) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
                 }
                 IconButton(onClick = { webView?.goForward() }, enabled = canGoForward) {
-                    Icon(Icons.AutoMirrored.Outlined.ArrowForward, "Forward", tint = if (canGoForward) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
+                    Icon(imageVector = Icons.AutoMirrored.Outlined.ArrowForward, contentDescription = "Forward", tint = if (canGoForward) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
                 }
                 
                 OutlinedTextField(
@@ -525,19 +525,19 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                     trailingIcon = { if (isLoading) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp) }
                 )
 
-                IconButton(onClick = { webView?.reload() }) { Icon(Icons.Outlined.Refresh, "Reload", tint = MaterialTheme.colorScheme.onSurface) }
-                IconButton(onClick = { showTools = !showTools }) { Icon(Icons.Outlined.Code, "Tools", tint = if (showTools) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
-                IconButton(onClick = { showMenu = true }) { Icon(Icons.Outlined.MoreVert, "Menu", tint = MaterialTheme.colorScheme.onSurface) }
+                IconButton(onClick = { webView?.reload() }) { Icon(imageVector = Icons.Outlined.Refresh, contentDescription = "Reload", tint = MaterialTheme.colorScheme.onSurface) }
+                IconButton(onClick = { showTools = !showTools }) { Icon(imageVector = Icons.Outlined.Code, contentDescription = "Tools", tint = if (showTools) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) }
+                IconButton(onClick = { showMenu = true }) { Icon(imageVector = Icons.Outlined.MoreVert, contentDescription = "Menu", tint = MaterialTheme.colorScheme.onSurface) }
                 
                 DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                     DropdownMenuItem(
                         text = { Text(if (desktopSite) "Modo Mobile" else "Modo Desktop") },
-                        leadingIcon = { Icon(if(desktopSite) Icons.Outlined.Smartphone else Icons.Outlined.DesktopWindows, null) },
+                        leadingIcon = { Icon(imageVector = if(desktopSite) Icons.Outlined.Smartphone else Icons.Outlined.DesktopWindows, contentDescription = null) },
                         onClick = { vm.setDesktopSite(!desktopSite); showMenu = false }
                     )
                     DropdownMenuItem(
                         text = { Text(if (inspectorMode) "Desativar Inspetor" else "Ativar Inspetor") },
-                        leadingIcon = { Icon(Icons.Outlined.HighlightMouse, null) },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.TouchApp, contentDescription = null) },
                         onClick = {
                             inspectorMode = !inspectorMode
                             if (inspectorMode) webView?.evaluateJavascript(inspectJs, null)
@@ -547,17 +547,17 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                     )
                     DropdownMenuItem(
                         text = { Text(if (blockRedirects) "Desbloquear Redirecionamentos" else "Bloquear Redirecionamentos") },
-                        leadingIcon = { Icon(Icons.Outlined.Block, null) },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.Block, contentDescription = null) },
                         onClick = { blockRedirects = !blockRedirects; showMenu = false }
                     )
                     DropdownMenuItem(
                         text = { Text(if (keepsEnabled) "Desativar Keeps" else "Ativar Keeps") },
-                        leadingIcon = { Icon(Icons.Outlined.Save, null) },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.Save, contentDescription = null) },
                         onClick = { keepsEnabled = !keepsEnabled; webView?.reload(); showMenu = false }
                     )
                     DropdownMenuItem(
                         text = { Text("Limpar Cache") },
-                        leadingIcon = { Icon(Icons.Outlined.DeleteSweep, null) },
+                        leadingIcon = { Icon(imageVector = Icons.Outlined.DeleteSweep, contentDescription = null) },
                         onClick = {
                             webView?.clearCache(true)
                             webView?.clearHistory()
@@ -1134,8 +1134,8 @@ private fun WebToolsPanel(
                                     Column(Modifier.padding(8.dp)) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Icon(
-                                                when(media.type) { "Video" -> Icons.Outlined.Videocam; "Audio" -> Icons.Outlined.AudioFile; else -> Icons.Outlined.Image },
-                                                null, tint = DC.Primary, modifier = Modifier.size(16.dp)
+                                                imageVector = when(media.type) { "Video" -> Icons.Outlined.Videocam; "Audio" -> Icons.Outlined.AudioFile; else -> Icons.Outlined.Image },
+                                                contentDescription = null, tint = DC.Primary, modifier = Modifier.size(16.dp)
                                             )
                                             Spacer(Modifier.width(8.dp))
                                             Text(media.type, color = DC.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)

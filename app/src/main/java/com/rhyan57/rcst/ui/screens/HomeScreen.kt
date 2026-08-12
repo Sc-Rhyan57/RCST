@@ -42,13 +42,12 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.rhyan57.rcst.MainViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -420,22 +419,30 @@ fun HomeScreen(vm: MainViewModel, onScrolled: (Boolean) -> Unit) {
                         downloadSiteZip = {
                             scope.launch(Dispatchers.IO) {
                                 try {
-                                    val client = OkHttpClient()
-                                    val baseUrl = webView?.url ?: return@launch
-                                    val doc = client.newCall(Request.Builder().url(baseUrl).build()).execute().body?.string() ?: ""
+                                    val baseUrlStr = webView?.url ?: return@launch
+                                    val url = URL(baseUrlStr)
+                                    val connection = url.openConnection() as HttpURLConnection
+                                    val doc = connection.inputStream.bufferedReader().use { it.readText() }
+                                    connection.disconnect()
+                                    
                                     val zipFile = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "site_${System.currentTimeMillis()}.zip")
                                     ZipOutputStream(FileOutputStream(zipFile)).use { zip ->
                                         zip.putNextEntry(ZipEntry("index.html"))
                                         zip.write(doc.toByteArray())
                                         zip.closeEntry()
+                                        
                                         val regex = Regex("(?:src|href)=[\"']([^\"']+)[\"']")
                                         val matches = regex.findAll(doc).map { it.groupValues[1] }.filter { it.startsWith("http") || it.startsWith("/") }.take(20)
+                                        
                                         for (match in matches) {
                                             try {
-                                                val absUrl = if (match.startsWith("http")) match else Uri.parse(baseUrl).buildUpon().path(match).build().toString()
-                                                val assetRes = client.newCall(Request.Builder().url(absUrl).build()).execute()
-                                                val assetBody = assetRes.body?.bytes() ?: continue
-                                                val name = absUrl.substringAfterLast('/').take(50).ifEmpty { "file_${System.currentTimeMillis()}" }
+                                                val absUrlStr = if (match.startsWith("http")) match else URL(url, match).toString()
+                                                val assetUrl = URL(absUrlStr)
+                                                val assetConn = assetUrl.openConnection() as HttpURLConnection
+                                                val assetBody = assetConn.inputStream.use { it.readBytes() }
+                                                assetConn.disconnect()
+                                                
+                                                val name = absUrlStr.substringAfterLast('/').take(50).ifEmpty { "file_${System.currentTimeMillis()}" }
                                                 zip.putNextEntry(ZipEntry("assets/$name"))
                                                 zip.write(assetBody)
                                                 zip.closeEntry()
